@@ -1,0 +1,18 @@
+Start testing: Oct 22 16:00 W. Europe Daylight Time
+----------------------------------------------------------
+1/1 Testing: swc-core-tests
+1/1 Test: swc-core-tests
+Command: "D:/Arj/SWC/build-cmake/swc-core-tests.exe"
+Directory: D:/Arj/SWC/build-cmake
+"swc-core-tests" start time: Oct 22 16:00 W. Europe Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"swc-core-tests" end time: Oct 22 16:00 W. Europe Daylight Time
+"swc-core-tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 22 16:00 W. Europe Daylight Time
