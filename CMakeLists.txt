@@ -10,7 +10,7 @@ include(CTest)
 add_executable(simple-wallpaper-changer src/main.cpp)
 target_compile_features(simple-wallpaper-changer PRIVATE cxx_std_17)
 target_compile_definitions(simple-wallpaper-changer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(simple-wallpaper-changer PRIVATE ole32 windowscodecs shlwapi user32)
+target_link_libraries(simple-wallpaper-changer PRIVATE ole32 windowscodecs shlwapi user32 uuid)
 
 if(BUILD_TESTING)
     add_executable(swc-core-tests tests/core_tests.cpp)

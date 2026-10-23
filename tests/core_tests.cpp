@@ -1,5 +1,6 @@
 #include "../src/core.h"
 
+#include <algorithm>
 #include <cassert>
 #include <sstream>
 #include <string>
@@ -43,4 +44,20 @@ int main() {
     assert((swc::CandidateAttemptOrder(names, L"3.jpg") == std::vector<std::size_t>{0, 1, 2}));
     assert((swc::CandidateAttemptOrder(names, L"missing.jpg") == std::vector<std::size_t>{0, 1, 2}));
     assert(swc::CandidateAttemptOrder({}, L"").empty());
+
+    {
+        std::wstring lastImage = L"1.jpg";
+        std::vector<std::wstring> assigned;
+        for (std::size_t display = 0; display < 4; ++display) {
+            const auto order = swc::CandidateAttemptOrder(names, lastImage);
+            const auto selected = std::find_if(order.begin(), order.end(), [](std::size_t index) {
+                return index != 1;
+            });
+            assert(selected != order.end());
+            lastImage = names[*selected];
+            assigned.push_back(lastImage);
+        }
+        assert((assigned == std::vector<std::wstring>{
+            L"3.jpg", L"1.jpg", L"3.jpg", L"1.jpg"}));
+    }
 }

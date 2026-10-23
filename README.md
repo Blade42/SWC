@@ -29,7 +29,9 @@ Supported filename extensions are `.jpg`, `.jpeg`, `.png`, and `.webp`, case-ins
 
 ## Output and limitations
 
-`wallpaper-background.png` is generated beside the executable at the primary display's current resolution. The input is scaled to fit fully, centered, and letterboxed in black if its aspect ratio differs. The generated PNG is applied using the Windows desktop wallpaper API, which may span or otherwise position the wallpaper according to the user's Windows desktop-background settings; it does not independently control each monitor.
+One PNG is generated beside the executable for each connected display. The primary display uses `wallpaper-background.png`; additional displays use `wallpaper-background-2.png`, `wallpaper-background-3.png`, and so on. Each image is created at that display's current resolution, with its source scaled to fit fully, centered, and letterboxed in black if its aspect ratio differs. The Windows per-monitor desktop wallpaper API applies each generated image to its corresponding display.
+
+Displays are processed primary-first. Each display gets the next readable image in the sorted sequence; unreadable images are skipped as before. The sequence wraps and may reuse images if there are fewer readable images than displays. `last_image` records the final image assigned, so the next run continues after the full display sequence. Generated wallpaper PNGs are not considered source images.
 
 WebP decoding depends on a WebP WIC decoder being installed and registered on the computer. Stock Windows 10 installations may not provide one. Without a registered decoder, WebP files are treated as unreadable and skipped; install the relevant Windows codec while online if WebP support is needed. JPG, JPEG, and PNG use Windows' built-in WIC codecs.
 
