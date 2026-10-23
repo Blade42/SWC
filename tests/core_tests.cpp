@@ -106,37 +106,97 @@ int main() {
     assert(swc::PreviousCandidateAttemptOrder({}, L"").empty());
 
     {
-        std::wstring lastImage = L"2.jpg";
-        std::vector<std::wstring> previousImages;
-        for (std::size_t display = 0; display < 2; ++display) {
-            const auto order = swc::PreviousCandidateAttemptOrder(names, lastImage);
-            lastImage = names[order.front()];
-            previousImages.push_back(lastImage);
+        const std::vector<std::wstring> sequence = {
+            L"1.jpg", L"2.jpg", L"3.jpg", L"4.jpg", L"5.jpg"};
+        std::wstring cursor = L"4.jpg";
+        const auto skippedCurrentFirst = swc::PreviousCandidateAttemptOrder(sequence, cursor);
+        cursor = sequence[skippedCurrentFirst.front()];
+
+        std::vector<std::wstring> previousImages(2);
+        for (std::size_t offset = 0; offset < previousImages.size(); ++offset) {
+            const std::size_t display = previousImages.size() - 1 - offset;
+            const auto order = swc::PreviousCandidateAttemptOrder(sequence, cursor);
+            cursor = sequence[order.front()];
+            previousImages[display] = cursor;
         }
-        assert((previousImages == std::vector<std::wstring>{L"1.jpg", L"3.jpg"}));
+        assert((previousImages == std::vector<std::wstring>{L"1.jpg", L"2.jpg"}));
+        assert(cursor == L"1.jpg");
+
+        std::wstring lastDisplayImage = previousImages.back();
+        cursor = lastDisplayImage;
 
         std::vector<std::wstring> nextImages;
-        for (std::size_t display = 0; display < 2; ++display) {
-            const auto order = swc::CandidateAttemptOrder(names, lastImage);
-            lastImage = names[order.front()];
-            nextImages.push_back(lastImage);
+        for (std::size_t display = 0; display < previousImages.size(); ++display) {
+            const auto order = swc::CandidateAttemptOrder(sequence, cursor);
+            cursor = sequence[order.front()];
+            nextImages.push_back(cursor);
         }
-        assert((nextImages == std::vector<std::wstring>{L"1.jpg", L"2.jpg"}));
+        assert((nextImages == std::vector<std::wstring>{L"3.jpg", L"4.jpg"}));
     }
 
     {
-        std::wstring lastImage = L"1.jpg";
-        std::vector<std::wstring> previousImages;
-        for (std::size_t display = 0; display < 2; ++display) {
-            const auto order = swc::PreviousCandidateAttemptOrder(names, lastImage);
-            const auto selected = std::find_if(order.begin(), order.end(), [](std::size_t index) {
-                return index != 1;
-            });
+        const std::vector<std::wstring> sequence = {
+            L"1.jpg", L"bad-a.jpg", L"2.jpg", L"bad-b.jpg", L"3.jpg", L"4.jpg"};
+        std::wstring cursor = L"4.jpg";
+        const auto skipOrder = swc::PreviousCandidateAttemptOrder(sequence, cursor);
+        const auto skippedCurrentFirst = std::find_if(
+            skipOrder.begin(),
+            skipOrder.end(),
+            [&](std::size_t index) { return sequence[index].find(L"bad") == std::wstring::npos; });
+        assert(skippedCurrentFirst != skipOrder.end());
+        cursor = sequence[*skippedCurrentFirst];
+
+        std::vector<std::wstring> previousImages(2);
+        for (std::size_t offset = 0; offset < previousImages.size(); ++offset) {
+            const std::size_t display = previousImages.size() - 1 - offset;
+            const auto order = swc::PreviousCandidateAttemptOrder(sequence, cursor);
+            const auto selected = std::find_if(
+                order.begin(),
+                order.end(),
+                [&](std::size_t index) { return sequence[index].find(L"bad") == std::wstring::npos; });
             assert(selected != order.end());
-            lastImage = names[*selected];
-            previousImages.push_back(lastImage);
+            cursor = sequence[*selected];
+            previousImages[display] = cursor;
         }
-        assert((previousImages == std::vector<std::wstring>{L"3.jpg", L"1.jpg"}));
+        assert((previousImages == std::vector<std::wstring>{L"1.jpg", L"2.jpg"}));
+    }
+
+    {
+        const std::vector<std::wstring> sequence = {
+            L"1.jpg", L"2.jpg", L"3.jpg", L"4.jpg", L"5.jpg", L"6.jpg"};
+
+        std::wstring cursor = L"4.jpg";
+        std::vector<std::wstring> singleDisplay;
+        const auto singleOrder = swc::PreviousCandidateAttemptOrder(sequence, cursor);
+        cursor = sequence[singleOrder.front()];
+        singleDisplay.push_back(cursor);
+        assert((singleDisplay == std::vector<std::wstring>{L"3.jpg"}));
+        cursor = singleDisplay.back();
+        assert(sequence[swc::CandidateAttemptOrder(sequence, cursor).front()] == L"4.jpg");
+
+        cursor = L"6.jpg";
+        for (std::size_t skipped = 1; skipped < 3; ++skipped) {
+            const auto order = swc::PreviousCandidateAttemptOrder(sequence, cursor);
+            cursor = sequence[order.front()];
+        }
+        std::vector<std::wstring> threeDisplays(3);
+        for (std::size_t offset = 0; offset < threeDisplays.size(); ++offset) {
+            const std::size_t display = threeDisplays.size() - 1 - offset;
+            const auto order = swc::PreviousCandidateAttemptOrder(sequence, cursor);
+            cursor = sequence[order.front()];
+            threeDisplays[display] = cursor;
+        }
+        assert((threeDisplays == std::vector<std::wstring>{
+            L"1.jpg", L"2.jpg", L"3.jpg"}));
+        cursor = threeDisplays.back();
+        std::vector<std::wstring> restored;
+        for (std::size_t display = 0; display < threeDisplays.size(); ++display) {
+            const auto order = swc::CandidateAttemptOrder(sequence, cursor);
+            cursor = sequence[order.front()];
+            restored.push_back(cursor);
+        }
+        assert((restored == std::vector<std::wstring>{
+            L"4.jpg", L"5.jpg", L"6.jpg"}));
     }
 
     {

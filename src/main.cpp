@@ -707,6 +707,16 @@ void Run(bool previous = false) {
     generated.reserve(displays.size());
     std::vector<std::filesystem::path> temporaryPaths;
     temporaryPaths.reserve(displays.size());
+    std::vector<std::filesystem::path> outputPaths;
+    outputPaths.reserve(displays.size());
+    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+        const std::wstring fileName = displayIndex == 0
+            ? L"wallpaper-background.png"
+            : L"wallpaper-background-" + std::to_wstring(displayIndex + 1) + L".png";
+        const auto outputPath = executableDirectory / fileName;
+        outputPaths.push_back(outputPath);
+        temporaryPaths.emplace_back(outputPath.wstring() + L".tmp");
+    }
     struct TemporaryFiles {
         std::vector<std::filesystem::path>& paths;
         ~TemporaryFiles() {
@@ -717,28 +727,20 @@ void Run(bool previous = false) {
     } temporaryFiles{temporaryPaths};
 
     std::wstring lastImage = settings.lastImage;
-    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
-        const auto& display = displays[displayIndex];
-        const std::wstring fileName = displayIndex == 0
-            ? L"wallpaper-background.png"
-            : L"wallpaper-background-" + std::to_wstring(displayIndex + 1) + L".png";
-        const auto outputPath = executableDirectory / fileName;
-        const auto temporaryPath = std::filesystem::path(outputPath.wstring() + L".tmp");
-        temporaryPaths.push_back(temporaryPath);
-
+    const auto selectCandidate = [&](std::size_t displayIndex, const std::wstring& cursor) {
         std::vector<std::wstring> failures;
         std::size_t selectedIndex = images.size();
         const auto order = previous
-            ? swc::PreviousCandidateAttemptOrder(names, lastImage)
-            : swc::CandidateAttemptOrder(names, lastImage);
+            ? swc::PreviousCandidateAttemptOrder(names, cursor)
+            : swc::CandidateAttemptOrder(names, cursor);
         for (const std::size_t index : order) {
             try {
                 CreateBackgroundPng(
                     factory.Get(),
                     images[index],
-                    display.width,
-                    display.height,
-                    temporaryPath);
+                    displays[displayIndex].width,
+                    displays[displayIndex].height,
+                    temporaryPaths[displayIndex]);
                 selectedIndex = index;
                 break;
             } catch (const Failure& failure) {
@@ -758,8 +760,32 @@ void Run(bool previous = false) {
             Fail(message);
         }
 
+        return selectedIndex;
+    };
+
+    const bool hasSavedCursor =
+        std::find(names.begin(), names.end(), lastImage) != names.end();
+    if (previous && hasSavedCursor) {
+        for (std::size_t skippedDisplay = 1; skippedDisplay < displays.size(); ++skippedDisplay) {
+            const auto currentSequenceImage = selectCandidate(0, lastImage);
+            lastImage = names[currentSequenceImage];
+        }
+    }
+
+    std::wstring lastDisplayImage = lastImage;
+    for (std::size_t offset = 0; offset < displays.size(); ++offset) {
+        const std::size_t displayIndex = previous
+            ? displays.size() - 1 - offset
+            : offset;
+        const std::size_t selectedIndex = selectCandidate(displayIndex, lastImage);
         lastImage = names[selectedIndex];
-        generated.push_back({display, temporaryPath, outputPath});
+        if (displayIndex == displays.size() - 1) {
+            lastDisplayImage = lastImage;
+        }
+        generated.push_back({
+            displays[displayIndex],
+            temporaryPaths[displayIndex],
+            outputPaths[displayIndex]});
     }
 
     for (const auto& item : generated) {
@@ -774,7 +800,7 @@ void Run(bool previous = false) {
     for (const auto& item : generated) {
         ApplyWallpaper(wallpaper.Get(), item.display, item.outputPath);
     }
-    WriteSettings(settingsPath, settings, lastImage);
+    WriteSettings(settingsPath, settings, previous ? lastDisplayImage : lastImage);
 }
 
 void ShowError(const std::wstring& message, HWND owner = nullptr) {
