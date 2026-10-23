@@ -14,6 +14,7 @@ namespace swc {
 struct Settings {
     std::wstring sourceDirectory;
     std::wstring lastImage;
+    bool changeOnStart = true;
 };
 
 struct FitRect {
@@ -158,6 +159,12 @@ inline Settings ParseSettings(std::wistream& input) {
             settings.sourceDirectory = value;
         } else if (identifier == L"last_image") {
             settings.lastImage = value;
+        } else if (identifier == L"change_on_start") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            settings.changeOnStart = normalized == L"false" ? false : true;
         }
     }
     return settings;

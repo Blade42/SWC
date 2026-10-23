@@ -1,6 +1,6 @@
 # Simple Wallpaper Changer
 
-A small Windows 10 C++ program that chooses the next image in a folder, creates a display-sized PNG, and applies it as the desktop wallpaper. Image decoding and encoding use Windows Imaging Component (WIC); there are no bundled runtime libraries or network requirements. The process runs at idle priority.
+A small Windows C++ program that runs as a background resident with a system-tray icon. The tray menu can advance wallpapers on demand or exit the resident. It chooses images from a folder, creates a display-sized PNG for each connected display, and applies them as the desktop wallpapers. Image decoding and encoding use Windows Imaging Component (WIC); there are no bundled runtime libraries or network requirements. The process runs at idle priority.
 
 ## Build
 
@@ -21,9 +21,10 @@ Place `settings.ini` beside the executable. Values use `Identifier=value`; text 
 ```ini
 source_directory=C:\Users\Example\Pictures\Wallpapers
 last_image=wallpaper2.jpg
+change_on_start=true
 ```
 
-An empty or unavailable source directory falls back to the process current directory. Relative source paths are resolved from the executable directory. If `last_image` is missing or not present in the folder, selection starts at the first image.
+`change_on_start` accepts `true` or `false`, case-insensitively. It defaults to `true` when missing or invalid. When true, the resident changes wallpapers once after starting; when false, it waits for the tray menu's **Next** command. An empty or unavailable source directory falls back to the process current directory. Relative source paths are resolved from the executable directory. If `last_image` is missing or not present in the folder, selection starts at the first image.
 
 Supported filename extensions are `.jpg`, `.jpeg`, `.png`, and `.webp`, case-insensitively. Files are sorted with Windows logical filename ordering. If a selected image cannot be decoded, the program tries subsequent images in order.
 
@@ -35,4 +36,8 @@ Displays are processed primary-first. Each display gets the next readable image 
 
 WebP decoding depends on a WebP WIC decoder being installed and registered on the computer. Stock Windows 10 installations may not provide one. Without a registered decoder, WebP files are treated as unreadable and skipped; install the relevant Windows codec while online if WebP support is needed. JPG, JPEG, and PNG use Windows' built-in WIC codecs.
 
-If the folder contains no supported image files, the program exits without changing the wallpaper or settings. If every supported image is missing or unreadable, it reports an error and leaves `last_image` unchanged.
+Launching the executable starts a resident process and exits. Repeated launches do not create duplicate residents. The tray icon tooltip is **Simple Wallpaper Changer**. Right-click it to select **Next** and change wallpapers, or **Exit** to remove the tray icon and stop the resident after any current wallpaper change has cleaned up.
+
+The tray icon is an original generic wallpaper-themed icon included in `src\tray-icon.ico`; it does not redistribute the linked stock photograph.
+
+If the folder contains no supported image files, a wallpaper change ends without changing the wallpaper or settings. If every supported image is missing or unreadable, it reports an error and leaves `last_image` unchanged; the resident remains available for another attempt.
