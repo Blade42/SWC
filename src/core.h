@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cwctype>
 #include <istream>
@@ -21,6 +22,85 @@ struct FitRect {
     std::uint32_t width;
     std::uint32_t height;
 };
+
+struct ColorSample {
+    std::uint8_t red;
+    std::uint8_t green;
+    std::uint8_t blue;
+    std::uint8_t alpha;
+};
+
+struct RgbColor {
+    std::uint8_t red;
+    std::uint8_t green;
+    std::uint8_t blue;
+};
+
+inline RgbColor EstimateBackgroundColor(
+    const std::vector<ColorSample>& samples,
+    std::uint32_t width,
+    std::uint32_t height) {
+    if (width == 0 || height == 0 ||
+        static_cast<std::uint64_t>(width) * height != samples.size()) {
+        return {};
+    }
+
+    struct ColorBucket {
+        std::uint64_t weight = 0;
+        std::uint64_t red = 0;
+        std::uint64_t green = 0;
+        std::uint64_t blue = 0;
+    };
+    constexpr std::size_t bucketCount = 32 * 32 * 32;
+    std::vector<ColorBucket> histogram(bucketCount);
+
+    for (std::uint32_t y = 0; y < height; ++y) {
+        const long double verticalEdgeDistance = height > 1
+            ? static_cast<long double>(std::min(y, height - 1 - y)) / (height - 1)
+            : 0.0L;
+        for (std::uint32_t x = 0; x < width; ++x) {
+            const auto& sample = samples[static_cast<std::size_t>(y) * width + x];
+            if (sample.alpha == 0) {
+                continue;
+            }
+
+            const long double horizontalEdgeDistance = width > 1
+                ? static_cast<long double>(std::min(x, width - 1 - x)) / (width - 1)
+                : 0.0L;
+            const long double edgeDistance =
+                std::min(horizontalEdgeDistance, verticalEdgeDistance);
+            const long double edgeProximity = std::max(0.0L, 1.0L - edgeDistance * 4.0L);
+            const std::uint64_t edgeWeight =
+                100 + static_cast<std::uint64_t>(edgeProximity * 300.0L + 0.5L);
+            const std::uint64_t weight = edgeWeight * sample.alpha;
+
+            const std::size_t bucket =
+                (static_cast<std::size_t>(sample.red >> 3) << 10) |
+                (static_cast<std::size_t>(sample.green >> 3) << 5) |
+                (sample.blue >> 3);
+            auto& color = histogram[bucket];
+            color.weight += weight;
+            color.red += weight * sample.red;
+            color.green += weight * sample.green;
+            color.blue += weight * sample.blue;
+        }
+    }
+
+    const auto dominant = std::max_element(
+        histogram.begin(),
+        histogram.end(),
+        [](const ColorBucket& left, const ColorBucket& right) {
+            return left.weight < right.weight;
+        });
+    if (dominant == histogram.end() || dominant->weight == 0) {
+        return {};
+    }
+
+    return {
+        static_cast<std::uint8_t>((dominant->red + dominant->weight / 2) / dominant->weight),
+        static_cast<std::uint8_t>((dominant->green + dominant->weight / 2) / dominant->weight),
+        static_cast<std::uint8_t>((dominant->blue + dominant->weight / 2) / dominant->weight)};
+}
 
 inline FitRect CalculateFitRect(
     std::uint32_t sourceWidth,

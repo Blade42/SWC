@@ -417,6 +417,61 @@ ComPtr<IWICImagingFactory> CreateImagingFactory() {
     return factory;
 }
 
+swc::RgbColor EstimateImageBackgroundColor(
+    IWICImagingFactory* factory,
+    IWICFormatConverter* converter,
+    UINT sourceWidth,
+    UINT sourceHeight) {
+    constexpr UINT sampleMaximum = 128;
+    const auto sampleFit =
+        swc::CalculateFitRect(sourceWidth, sourceHeight, sampleMaximum, sampleMaximum);
+    const UINT sampleWidth = sampleFit.width;
+    const UINT sampleHeight = sampleFit.height;
+    const UINT sampleStride = sampleWidth * 4;
+    const std::uint64_t sampleBytes =
+        static_cast<std::uint64_t>(sampleStride) * sampleHeight;
+
+    ComPtr<IWICBitmapScaler> sampleScaler;
+    CheckHr(factory->CreateBitmapScaler(sampleScaler.Put()), L"Could not create color sampler");
+    CheckHr(
+        sampleScaler->Initialize(
+            converter,
+            sampleWidth,
+            sampleHeight,
+            WICBitmapInterpolationModeFant),
+        L"Could not resize the image for color sampling");
+
+    std::vector<BYTE> samplePixels(static_cast<std::size_t>(sampleBytes));
+    CheckHr(
+        sampleScaler->CopyPixels(
+            nullptr,
+            sampleStride,
+            static_cast<UINT>(sampleBytes),
+            samplePixels.data()),
+        L"Could not read image pixels for color sampling");
+
+    std::vector<swc::ColorSample> samples;
+    samples.reserve(static_cast<std::size_t>(sampleWidth) * sampleHeight);
+    for (std::size_t offset = 0; offset < samplePixels.size(); offset += 4) {
+        const UINT alpha = samplePixels[offset + 3];
+        if (alpha == 0) {
+            samples.push_back({0, 0, 0, 0});
+            continue;
+        }
+
+        const auto unpremultiply = [alpha](BYTE component) {
+            return static_cast<std::uint8_t>(
+                std::min(255U, (static_cast<UINT>(component) * 255U + alpha / 2) / alpha));
+        };
+        samples.push_back({
+            unpremultiply(samplePixels[offset + 2]),
+            unpremultiply(samplePixels[offset + 1]),
+            unpremultiply(samplePixels[offset]),
+            static_cast<std::uint8_t>(alpha)});
+    }
+    return swc::EstimateBackgroundColor(samples, sampleWidth, sampleHeight);
+}
+
 void CreateBackgroundPng(
     IWICImagingFactory* factory,
     const std::filesystem::path& source,
@@ -459,6 +514,9 @@ void CreateBackgroundPng(
             WICBitmapPaletteTypeCustom),
         L"Could not convert the source image");
 
+    const auto background =
+        EstimateImageBackgroundColor(factory, converter.Get(), sourceWidth, sourceHeight);
+
     ComPtr<IWICBitmapScaler> scaler;
     CheckHr(factory->CreateBitmapScaler(scaler.Put()), L"Could not create image scaler");
     CheckHr(
@@ -478,9 +536,12 @@ void CreateBackgroundPng(
     const std::uint64_t scaledBytes =
         static_cast<std::uint64_t>(scaledWidth) * scaledHeight * 4;
 
-    std::vector<BYTE> canvas(static_cast<std::size_t>(outputBytes), 0);
-    for (std::size_t offset = 3; offset < canvas.size(); offset += 4) {
-        canvas[offset] = 255;
+    std::vector<BYTE> canvas(static_cast<std::size_t>(outputBytes));
+    for (std::size_t offset = 0; offset < canvas.size(); offset += 4) {
+        canvas[offset] = background.blue;
+        canvas[offset + 1] = background.green;
+        canvas[offset + 2] = background.red;
+        canvas[offset + 3] = 255;
     }
 
     const UINT scaledStride = scaledWidth * 4;

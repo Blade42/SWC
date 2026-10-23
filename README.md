@@ -29,7 +29,7 @@ Supported filename extensions are `.jpg`, `.jpeg`, `.png`, and `.webp`, case-ins
 
 ## Output and limitations
 
-One PNG is generated beside the executable for each connected display. The primary display uses `wallpaper-background.png`; additional displays use `wallpaper-background-2.png`, `wallpaper-background-3.png`, and so on. Each image is created at that display's current resolution, with its source scaled to fit fully, centered, and letterboxed in black if its aspect ratio differs. The Windows per-monitor desktop wallpaper API applies each generated image to its corresponding display.
+One PNG is generated beside the executable for each connected display. The primary display uses `wallpaper-background.png`; additional displays use `wallpaper-background-2.png`, `wallpaper-background-3.png`, and so on. Each image is created at that display's current resolution, with its source scaled to fit fully and centered. Any uncovered area is filled with a color estimated from the image: a border-weighted dominant color, sampled from a small thumbnail. Fully transparent pixels are ignored and partially transparent pixels contribute in proportion to their opacity. The Windows per-monitor desktop wallpaper API applies each generated image to its corresponding display.
 
 Displays are processed primary-first. Each display gets the next readable image in the sorted sequence; unreadable images are skipped as before. The sequence wraps and may reuse images if there are fewer readable images than displays. `last_image` records the final image assigned, so the next run continues after the full display sequence. Generated wallpaper PNGs are not considered source images.
 
