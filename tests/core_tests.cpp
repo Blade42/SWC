@@ -18,6 +18,22 @@ int main() {
         const auto settings = swc::ParseSettings(input);
         assert(settings.sourceDirectory == L"C:\\Wallpapers");
         assert(settings.lastImage == L"three=final.png");
+        assert(settings.changeOnStart);
+    }
+
+    {
+        std::wistringstream input(L"change_on_start=FALSE\n");
+        assert(!swc::ParseSettings(input).changeOnStart);
+    }
+
+    {
+        std::wistringstream input(L"change_on_start=TrUe\n");
+        assert(swc::ParseSettings(input).changeOnStart);
+    }
+
+    {
+        std::wistringstream input(L"change_on_start=invalid\n");
+        assert(swc::ParseSettings(input).changeOnStart);
     }
 
     assert(swc::IsSupportedExtension(L".JPG"));
