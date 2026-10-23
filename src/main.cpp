@@ -1,28 +1,43 @@
 #include "core.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <wincodec.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#include "resource.h"
 
 namespace {
 
 struct Failure {
     std::wstring message;
 };
+
+constexpr wchar_t kResidentMutexName[] = L"Local\\SimpleWallpaperChanger.Resident";
+constexpr wchar_t kResidentWindowClass[] = L"SimpleWallpaperChangerResidentWindow";
+constexpr UINT kTrayCallbackMessage = WM_APP + 1;
+constexpr UINT kWallpaperChangeCompleteMessage = WM_APP + 2;
+constexpr UINT kTrayIconId = 1;
+constexpr UINT kNextCommandId = 1001;
+constexpr UINT kExitCommandId = 1002;
+constexpr UINT_PTR kWorkerPollTimerId = 1;
 
 template <typename T>
 class ComPtr {
@@ -105,7 +120,7 @@ std::wstring FilesystemErrorText(const std::error_code& error) {
     Fail(operation + L": " + Win32Message(error));
 }
 
-std::filesystem::path ExecutableDirectory() {
+std::filesystem::path ExecutablePath() {
     std::vector<wchar_t> buffer(MAX_PATH);
     for (;;) {
         const DWORD length = GetModuleFileNameW(
@@ -116,13 +131,17 @@ std::filesystem::path ExecutableDirectory() {
             FailWin32(L"Could not locate the executable");
         }
         if (length < buffer.size() - 1) {
-            return std::filesystem::path(std::wstring(buffer.data(), length)).parent_path();
+            return std::filesystem::path(std::wstring(buffer.data(), length));
         }
         if (buffer.size() >= 32768) {
             Fail(L"The executable path is too long.");
         }
         buffer.resize(std::min<std::size_t>(buffer.size() * 2, 32768));
     }
+}
+
+std::filesystem::path ExecutableDirectory() {
+    return ExecutablePath().parent_path();
 }
 
 std::wstring Utf8ToWide(const std::string& text) {
@@ -624,7 +643,8 @@ void WriteSettings(
     const std::wstring& selectedImage) {
     const std::wstring contents =
         L"source_directory=" + settings.sourceDirectory + L"\r\n" +
-        L"last_image=" + selectedImage + L"\r\n";
+        L"last_image=" + selectedImage + L"\r\n" +
+        L"change_on_start=" + (settings.changeOnStart ? L"true" : L"false") + L"\r\n";
     const std::filesystem::path temporary = path.wstring() + L".tmp";
     const std::string bytes = WideToUtf8(contents);
     {
@@ -754,24 +774,352 @@ void Run() {
     WriteSettings(settingsPath, settings, lastImage);
 }
 
-void ShowError(const std::wstring& message) {
+void ShowError(const std::wstring& message, HWND owner = nullptr) {
     MessageBoxW(
-        nullptr,
+        owner,
         message.c_str(),
         L"Simple Wallpaper Changer",
         MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
+struct ResidentState {
+    HINSTANCE instance = nullptr;
+    HWND window = nullptr;
+    NOTIFYICONDATAW icon{};
+    bool iconAdded = false;
+    bool changeRunning = false;
+    bool shuttingDown = false;
+    std::atomic_bool changeFinished = false;
+    std::thread changeThread;
+    std::mutex errorMutex;
+    std::wstring changeError;
+    std::wstring startupError;
+};
+
+bool AddTrayIcon(ResidentState& state) {
+    state.icon = {};
+    state.icon.cbSize = sizeof(state.icon);
+    state.icon.hWnd = state.window;
+    state.icon.uID = kTrayIconId;
+    state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    state.icon.uCallbackMessage = kTrayCallbackMessage;
+    state.icon.hIcon = LoadIconW(state.instance, MAKEINTRESOURCEW(IDI_TRAY_ICON));
+    if (!state.icon.hIcon) {
+        state.startupError = L"Could not load the tray icon resource.";
+        return false;
+    }
+    lstrcpynW(
+        state.icon.szTip,
+        L"Simple Wallpaper Changer",
+        static_cast<int>(std::size(state.icon.szTip)));
+    if (!Shell_NotifyIconW(NIM_ADD, &state.icon)) {
+        state.startupError = L"Could not create the tray icon: " + Win32Message(GetLastError());
+        return false;
+    }
+    state.iconAdded = true;
+    return true;
+}
+
+void RemoveTrayIcon(ResidentState& state) {
+    if (state.iconAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &state.icon);
+        state.iconAdded = false;
+    }
+}
+
+void CompleteWallpaperChange(ResidentState& state) {
+    if (!state.changeRunning || !state.changeFinished.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (state.changeThread.joinable()) {
+        state.changeThread.join();
+    }
+    state.changeRunning = false;
+
+    std::wstring error;
+    {
+        std::lock_guard<std::mutex> lock(state.errorMutex);
+        error.swap(state.changeError);
+    }
+    if (!error.empty() && !state.shuttingDown) {
+        ShowError(error, state.window);
+    }
+}
+
+void StartWallpaperChange(ResidentState& state) {
+    if (state.changeRunning) {
+        ShowError(L"A wallpaper change is already in progress.", state.window);
+        return;
+    }
+
+    state.changeRunning = true;
+    state.changeFinished.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(state.errorMutex);
+        state.changeError.clear();
+    }
+
+    try {
+        state.changeThread = std::thread([&state]() {
+            std::wstring error;
+            try {
+                Run();
+            } catch (const Failure& failure) {
+                error = failure.message;
+            } catch (const std::exception&) {
+                error = L"Wallpaper change failed due to an unexpected system error.";
+            } catch (...) {
+                error = L"Wallpaper change failed due to an unexpected error.";
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state.errorMutex);
+                state.changeError = std::move(error);
+            }
+            state.changeFinished.store(true, std::memory_order_release);
+            PostMessageW(state.window, kWallpaperChangeCompleteMessage, 0, 0);
+        });
+    } catch (const std::system_error& error) {
+        state.changeRunning = false;
+        ShowError(
+            L"Could not start the wallpaper change: " +
+                std::wstring(error.what(), error.what() + std::char_traits<char>::length(error.what())),
+            state.window);
+    } catch (const std::exception&) {
+        state.changeRunning = false;
+        ShowError(L"Could not start the wallpaper change due to a system error.", state.window);
+    }
+}
+
+void ShowTrayMenu(ResidentState& state) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) {
+        ShowError(L"Could not create the tray menu: " + Win32Message(GetLastError()), state.window);
+        return;
+    }
+    if (!AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") ||
+        !AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit")) {
+        const DWORD error = GetLastError();
+        DestroyMenu(menu);
+        ShowError(L"Could not populate the tray menu: " + Win32Message(error), state.window);
+        return;
+    }
+
+    SetForegroundWindow(state.window);
+    const DWORD cursorPosition = GetMessagePos();
+    const UINT command = TrackPopupMenu(
+        menu,
+        TPM_RETURNCMD | TPM_RIGHTBUTTON,
+        static_cast<short>(LOWORD(cursorPosition)),
+        static_cast<short>(HIWORD(cursorPosition)),
+        0,
+        state.window,
+        nullptr);
+    DestroyMenu(menu);
+    PostMessageW(state.window, WM_NULL, 0, 0);
+    if (command != 0 && !PostMessageW(
+            state.window,
+            WM_COMMAND,
+            MAKEWPARAM(command, 0),
+            0)) {
+        ShowError(L"Could not dispatch the tray menu command.", state.window);
+    }
+}
+
+void RequestResidentExit(ResidentState& state) {
+    if (state.shuttingDown) {
+        return;
+    }
+    state.shuttingDown = true;
+    KillTimer(state.window, kWorkerPollTimerId);
+    if (state.changeThread.joinable()) {
+        state.changeThread.join();
+    }
+    state.changeRunning = false;
+    RemoveTrayIcon(state);
+    DestroyWindow(state.window);
+}
+
+LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<ResidentState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* creation = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = static_cast<ResidentState*>(creation->lpCreateParams);
+        state->window = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+
+    switch (message) {
+    case WM_CREATE:
+        if (!AddTrayIcon(*state)) {
+            return -1;
+        }
+        if (!SetTimer(window, kWorkerPollTimerId, 250, nullptr)) {
+            state->startupError = L"Could not initialize wallpaper task monitoring: " +
+                Win32Message(GetLastError());
+            RemoveTrayIcon(*state);
+            return -1;
+        }
+        return 0;
+    case kTrayCallbackMessage:
+        if (wParam == kTrayIconId &&
+            (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)) {
+            ShowTrayMenu(*state);
+        }
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case kNextCommandId:
+            StartWallpaperChange(*state);
+            return 0;
+        case kExitCommandId:
+            RequestResidentExit(*state);
+            return 0;
+        default:
+            break;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
+    case kWallpaperChangeCompleteMessage:
+        CompleteWallpaperChange(*state);
+        return 0;
+    case WM_TIMER:
+        if (wParam == kWorkerPollTimerId) {
+            CompleteWallpaperChange(*state);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        RequestResidentExit(*state);
+        return 0;
+    case WM_DESTROY:
+        KillTimer(window, kWorkerPollTimerId);
+        RemoveTrayIcon(*state);
+        PostQuitMessage(0);
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+int RunResident(HINSTANCE instance) {
+    const auto settings = ReadSettings(ExecutableDirectory() / L"settings.ini");
+    ResidentState state;
+    state.instance = instance;
+
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.lpfnWndProc = ResidentWindowProc;
+    windowClass.hInstance = instance;
+    windowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_TRAY_ICON));
+    windowClass.lpszClassName = kResidentWindowClass;
+    if (!RegisterClassExW(&windowClass)) {
+        FailWin32(L"Could not register the resident window");
+    }
+
+    HWND window = CreateWindowExW(
+        0,
+        kResidentWindowClass,
+        L"Simple Wallpaper Changer",
+        WS_POPUP,
+        0,
+        0,
+        0,
+        0,
+        nullptr,
+        nullptr,
+        instance,
+        &state);
+    if (!window) {
+        if (!state.startupError.empty()) {
+            Fail(state.startupError);
+        }
+        FailWin32(L"Could not create the resident window");
+    }
+
+    if (settings.changeOnStart) {
+        StartWallpaperChange(state);
+    }
+
+    MSG message{};
+    for (;;) {
+        const BOOL result = GetMessageW(&message, nullptr, 0, 0);
+        if (result == -1) {
+            RequestResidentExit(state);
+            FailWin32(L"Could not read a resident window message");
+        }
+        if (result == 0) {
+            break;
+        }
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+
+    if (state.changeThread.joinable()) {
+        state.changeThread.join();
+    }
+    UnregisterClassW(kResidentWindowClass, instance);
+    return static_cast<int>(message.wParam);
+}
+
+void LaunchResident() {
+    const HANDLE existing = OpenMutexW(SYNCHRONIZE, FALSE, kResidentMutexName);
+    if (existing) {
+        CloseHandle(existing);
+        return;
+    }
+    const DWORD openError = GetLastError();
+    if (openError != ERROR_FILE_NOT_FOUND) {
+        FailWin32(L"Could not check whether the resident process is running", openError);
+    }
+
+    const auto executable = ExecutablePath();
+    std::wstring commandLine = L"\"" + executable.native() + L"\" --resident";
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+    if (!CreateProcessW(
+            executable.c_str(),
+            commandLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            executable.parent_path().c_str(),
+            &startup,
+            &process)) {
+        FailWin32(L"Could not start the resident process");
+    }
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+}
+
 } // namespace
 
-int main() {
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR commandLine, int) {
     if (!SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS)) {
         ShowError(L"Could not set the process to low priority: " + Win32Message(GetLastError()));
         return 1;
     }
 
     try {
-        Run();
+        if (commandLine && std::string(commandLine) == "--resident") {
+            SetLastError(ERROR_SUCCESS);
+            HANDLE mutex = CreateMutexW(nullptr, FALSE, kResidentMutexName);
+            if (!mutex) {
+                FailWin32(L"Could not create the resident process guard");
+            }
+            if (GetLastError() == ERROR_ALREADY_EXISTS) {
+                CloseHandle(mutex);
+                return 0;
+            }
+            const int result = RunResident(instance);
+            CloseHandle(mutex);
+            return result;
+        }
+
+        LaunchResident();
         return 0;
     } catch (const Failure& failure) {
         ShowError(failure.message);
