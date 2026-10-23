@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <shlwapi.h>
+#include <shobjidl.h>
 #include <wincodec.h>
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -247,20 +249,44 @@ std::filesystem::path ResolveSourceDirectory(
     return CurrentDirectory();
 }
 
-bool SameWindowsPath(const std::filesystem::path& left, const std::filesystem::path& right) {
-    const std::wstring leftText = left.lexically_normal().native();
-    const std::wstring rightText = right.lexically_normal().native();
-    return CompareStringOrdinal(
-        leftText.c_str(),
-        static_cast<int>(leftText.size()),
-        rightText.c_str(),
-        static_cast<int>(rightText.size()),
-        TRUE) == CSTR_EQUAL;
+bool StartsWithWindowsText(const std::wstring& text, const std::wstring& prefix) {
+    return text.size() >= prefix.size() &&
+        CompareStringOrdinal(
+            text.data(),
+            static_cast<int>(prefix.size()),
+            prefix.data(),
+            static_cast<int>(prefix.size()),
+            TRUE) == CSTR_EQUAL;
+}
+
+bool IsGeneratedWallpaperFile(const std::filesystem::path& path) {
+    const auto extension = path.extension().wstring();
+    if (CompareStringOrdinal(extension.c_str(), -1, L".png", -1, TRUE) != CSTR_EQUAL) {
+        return false;
+    }
+    const auto stem = path.stem().wstring();
+    constexpr wchar_t baseName[] = L"wallpaper-background";
+    if (CompareStringOrdinal(
+            stem.c_str(),
+            -1,
+            baseName,
+            static_cast<int>(std::size(baseName) - 1),
+            TRUE) == CSTR_EQUAL) {
+        return true;
+    }
+    constexpr wchar_t numberedPrefix[] = L"wallpaper-background-";
+    if (!StartsWithWindowsText(stem, numberedPrefix)) {
+        return false;
+    }
+    const auto number = stem.substr(std::size(numberedPrefix) - 1);
+    return !number.empty() && std::all_of(
+        number.begin(),
+        number.end(),
+        [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; });
 }
 
 std::vector<std::filesystem::path> FindImages(
-    const std::filesystem::path& sourceDirectory,
-    const std::filesystem::path& generatedImage) {
+    const std::filesystem::path& sourceDirectory) {
     std::error_code error;
     std::filesystem::directory_iterator iterator(sourceDirectory, error);
     if (error) {
@@ -281,7 +307,7 @@ std::vector<std::filesystem::path> FindImages(
         }
         if (!regularFile ||
             !swc::IsSupportedExtension(entry.path().extension().wstring()) ||
-            SameWindowsPath(entry.path(), generatedImage)) {
+            IsGeneratedWallpaperFile(entry.path())) {
             continue;
         }
         images.push_back(entry.path());
@@ -307,14 +333,75 @@ std::vector<std::filesystem::path> FindImages(
     return images;
 }
 
-std::pair<UINT, UINT> PrimaryDisplaySize() {
-    DEVMODEW mode{};
-    mode.dmSize = sizeof(mode);
-    if (!EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) ||
-        mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0) {
-        Fail(L"Could not determine the primary display resolution.");
+struct Display {
+    std::wstring devicePath;
+    UINT width;
+    UINT height;
+    bool primary;
+};
+
+ComPtr<IDesktopWallpaper> CreateDesktopWallpaper() {
+    ComPtr<IDesktopWallpaper> wallpaper;
+    CheckHr(
+        CoCreateInstance(
+            CLSID_DesktopWallpaper,
+            nullptr,
+            CLSCTX_ALL,
+            IID_PPV_ARGS(wallpaper.Put())),
+        L"Could not initialize per-monitor wallpaper support");
+    return wallpaper;
+}
+
+std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
+    UINT count = 0;
+    CheckHr(wallpaper->GetMonitorDevicePathCount(&count), L"Could not enumerate displays");
+    if (count == 0) {
+        Fail(L"Windows did not report any connected displays.");
     }
-    return {mode.dmPelsWidth, mode.dmPelsHeight};
+
+    std::vector<Display> displays;
+    displays.reserve(count);
+    for (UINT index = 0; index < count; ++index) {
+        LPWSTR rawDevicePath = nullptr;
+        const HRESULT pathResult = wallpaper->GetMonitorDevicePathAt(index, &rawDevicePath);
+        std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> devicePath(rawDevicePath, CoTaskMemFree);
+        CheckHr(pathResult, L"Could not read a display identifier");
+        if (!devicePath) {
+            Fail(L"Windows returned an empty display identifier.");
+        }
+
+        RECT rectangle{};
+        const HRESULT rectangleResult =
+            wallpaper->GetMonitorRECT(devicePath.get(), &rectangle);
+        if (rectangleResult == S_FALSE) {
+            continue;
+        }
+        CheckHr(rectangleResult, L"Could not read display dimensions");
+        const auto width = static_cast<long long>(rectangle.right) - rectangle.left;
+        const auto height = static_cast<long long>(rectangle.bottom) - rectangle.top;
+        if (width <= 0 || height <= 0 ||
+            width > std::numeric_limits<UINT>::max() ||
+            height > std::numeric_limits<UINT>::max()) {
+            Fail(L"Windows returned invalid display dimensions.");
+        }
+
+        displays.push_back({
+            devicePath.get(),
+            static_cast<UINT>(width),
+            static_cast<UINT>(height),
+            rectangle.left <= 0 && rectangle.right > 0 &&
+                rectangle.top <= 0 && rectangle.bottom > 0});
+    }
+
+    if (std::none_of(displays.begin(), displays.end(), [](const Display& display) {
+            return display.primary;
+        })) {
+        Fail(L"Could not identify the primary display.");
+    }
+    std::stable_sort(displays.begin(), displays.end(), [](const Display& left, const Display& right) {
+        return left.primary && !right.primary;
+    });
+    return displays;
 }
 
 ComPtr<IWICImagingFactory> CreateImagingFactory() {
@@ -461,15 +548,13 @@ void CreateBackgroundPng(
     CheckHr(encoder->Commit(), L"Could not finalize the background PNG");
 }
 
-void ApplyWallpaper(const std::filesystem::path& image) {
-    std::wstring filename = image.native();
-    if (!SystemParametersInfoW(
-            SPI_SETDESKWALLPAPER,
-            0,
-            filename.data(),
-            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)) {
-        FailWin32(L"Windows could not apply the wallpaper");
-    }
+void ApplyWallpaper(
+    IDesktopWallpaper* wallpaper,
+    const Display& display,
+    const std::filesystem::path& image) {
+    CheckHr(
+        wallpaper->SetWallpaper(display.devicePath.c_str(), image.c_str()),
+        L"Windows could not apply the wallpaper to a display");
 }
 
 void WriteSettings(
@@ -509,19 +594,10 @@ void Run() {
     const auto settings = ReadSettings(settingsPath);
     const auto sourceDirectory =
         ResolveSourceDirectory(settings.sourceDirectory, executableDirectory);
-    const auto outputPath = executableDirectory / L"wallpaper-background.png";
-    const auto images = FindImages(sourceDirectory, outputPath);
+    const auto images = FindImages(sourceDirectory);
     if (images.empty()) {
         return;
     }
-
-    std::vector<std::wstring> names;
-    names.reserve(images.size());
-    for (const auto& image : images) {
-        names.push_back(image.filename().wstring());
-    }
-    const auto order = swc::CandidateAttemptOrder(names, settings.lastImage);
-    const auto [width, height] = PrimaryDisplaySize();
 
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     CheckHr(comResult, L"Could not initialize Windows imaging");
@@ -530,46 +606,91 @@ void Run() {
             CoUninitialize();
         }
     } comUninitializer;
+    auto wallpaper = CreateDesktopWallpaper();
+    const auto displays = ConnectedDisplays(wallpaper.Get());
+
+    std::vector<std::wstring> names;
+    names.reserve(images.size());
+    for (const auto& image : images) {
+        names.push_back(image.filename().wstring());
+    }
+
     auto factory = CreateImagingFactory();
+    struct GeneratedWallpaper {
+        Display display;
+        std::filesystem::path temporaryPath;
+        std::filesystem::path outputPath;
+    };
+    std::vector<GeneratedWallpaper> generated;
+    generated.reserve(displays.size());
+    std::vector<std::filesystem::path> temporaryPaths;
+    temporaryPaths.reserve(displays.size());
+    struct TemporaryFiles {
+        std::vector<std::filesystem::path>& paths;
+        ~TemporaryFiles() {
+            for (const auto& path : paths) {
+                DeleteFileW(path.c_str());
+            }
+        }
+    } temporaryFiles{temporaryPaths};
 
-    std::vector<std::wstring> failures;
-    std::size_t selectedIndex = images.size();
-    const auto temporaryOutput =
-        executableDirectory / L"wallpaper-background.png.tmp";
-    for (const std::size_t index : order) {
-        try {
-            CreateBackgroundPng(
-                factory.Get(),
-                images[index],
-                width,
-                height,
-                temporaryOutput);
-            selectedIndex = index;
-            break;
-        } catch (const Failure& failure) {
-            failures.push_back(names[index] + L": " + failure.message);
+    std::wstring lastImage = settings.lastImage;
+    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+        const auto& display = displays[displayIndex];
+        const std::wstring fileName = displayIndex == 0
+            ? L"wallpaper-background.png"
+            : L"wallpaper-background-" + std::to_wstring(displayIndex + 1) + L".png";
+        const auto outputPath = executableDirectory / fileName;
+        const auto temporaryPath = std::filesystem::path(outputPath.wstring() + L".tmp");
+        temporaryPaths.push_back(temporaryPath);
+
+        std::vector<std::wstring> failures;
+        std::size_t selectedIndex = images.size();
+        const auto order = swc::CandidateAttemptOrder(names, lastImage);
+        for (const std::size_t index : order) {
+            try {
+                CreateBackgroundPng(
+                    factory.Get(),
+                    images[index],
+                    display.width,
+                    display.height,
+                    temporaryPath);
+                selectedIndex = index;
+                break;
+            } catch (const Failure& failure) {
+                failures.push_back(names[index] + L": " + failure.message);
+            }
+        }
+
+        if (selectedIndex == images.size()) {
+            std::wstring message = L"No usable image could be processed for display " +
+                std::to_wstring(displayIndex + 1) + L".";
+            for (std::size_t index = 0; index < failures.size() && index < 8; ++index) {
+                message += L"\r\n\r\n" + failures[index];
+            }
+            if (failures.size() > 8) {
+                message += L"\r\n\r\nAdditional images also failed.";
+            }
+            Fail(message);
+        }
+
+        lastImage = names[selectedIndex];
+        generated.push_back({display, temporaryPath, outputPath});
+    }
+
+    for (const auto& item : generated) {
+        if (!MoveFileExW(
+                item.temporaryPath.c_str(),
+                item.outputPath.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            FailWin32(L"Could not publish a generated wallpaper");
         }
     }
 
-    if (selectedIndex == images.size()) {
-        std::wstring message = L"No usable image could be processed.";
-        for (std::size_t index = 0; index < failures.size() && index < 8; ++index) {
-            message += L"\r\n\r\n" + failures[index];
-        }
-        if (failures.size() > 8) {
-            message += L"\r\n\r\nAdditional images also failed.";
-        }
-        Fail(message);
+    for (const auto& item : generated) {
+        ApplyWallpaper(wallpaper.Get(), item.display, item.outputPath);
     }
-
-    if (!MoveFileExW(
-            temporaryOutput.c_str(),
-            outputPath.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        FailWin32(L"Could not publish the generated wallpaper");
-    }
-    ApplyWallpaper(outputPath);
-    WriteSettings(settingsPath, settings, names[selectedIndex]);
+    WriteSettings(settingsPath, settings, lastImage);
 }
 
 void ShowError(const std::wstring& message) {
