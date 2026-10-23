@@ -36,7 +36,7 @@ Displays are processed primary-first. Each display gets the next readable image 
 
 WebP decoding depends on a WebP WIC decoder being installed and registered on the computer. Stock Windows 10 installations may not provide one. Without a registered decoder, WebP files are treated as unreadable and skipped; install the relevant Windows codec while online if WebP support is needed. JPG, JPEG, and PNG use Windows' built-in WIC codecs.
 
-Launching the executable starts a resident process and exits. Repeated launches do not create duplicate residents. The tray icon tooltip is **Simple Wallpaper Changer**. Right-click it to select **Next** and change wallpapers, or **Exit** to remove the tray icon and stop the resident after any current wallpaper change has cleaned up.
+Launching the executable starts a resident process and exits. Repeated launches do not create duplicate residents. The tray icon tooltip is **Simple Wallpaper Changer**. Right-click it to select **Next** to advance the image sequence, **Previous** to step backward through it, or **Exit** to remove the tray icon and stop the resident after any current wallpaper change has cleaned up. Previous walks the sorted list backward for each display, skipping unreadable images and wrapping from the first image to the last. The final display's selected image is saved to `last_image`, so a subsequent Next returns to the sequence that preceded the Previous operation.
 
 The tray icon is an original generic wallpaper-themed icon included in `src\tray-icon.ico`; it does not redistribute the linked stock photograph.
 

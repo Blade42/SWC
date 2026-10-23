@@ -36,7 +36,8 @@ constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT kWallpaperChangeCompleteMessage = WM_APP + 2;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kNextCommandId = 1001;
-constexpr UINT kExitCommandId = 1002;
+constexpr UINT kPreviousCommandId = 1002;
+constexpr UINT kExitCommandId = 1003;
 constexpr UINT_PTR kWorkerPollTimerId = 1;
 
 template <typename T>
@@ -669,7 +670,7 @@ void WriteSettings(
     }
 }
 
-void Run() {
+void Run(bool previous = false) {
     const auto executableDirectory = ExecutableDirectory();
     const auto settingsPath = executableDirectory / L"settings.ini";
     const auto settings = ReadSettings(settingsPath);
@@ -727,7 +728,9 @@ void Run() {
 
         std::vector<std::wstring> failures;
         std::size_t selectedIndex = images.size();
-        const auto order = swc::CandidateAttemptOrder(names, lastImage);
+        const auto order = previous
+            ? swc::PreviousCandidateAttemptOrder(names, lastImage)
+            : swc::CandidateAttemptOrder(names, lastImage);
         for (const std::size_t index : order) {
             try {
                 CreateBackgroundPng(
@@ -846,7 +849,7 @@ void CompleteWallpaperChange(ResidentState& state) {
     }
 }
 
-void StartWallpaperChange(ResidentState& state) {
+void StartWallpaperChange(ResidentState& state, bool previous = false) {
     if (state.changeRunning) {
         ShowError(L"A wallpaper change is already in progress.", state.window);
         return;
@@ -860,10 +863,10 @@ void StartWallpaperChange(ResidentState& state) {
     }
 
     try {
-        state.changeThread = std::thread([&state]() {
+        state.changeThread = std::thread([&state, previous]() {
             std::wstring error;
             try {
-                Run();
+                Run(previous);
             } catch (const Failure& failure) {
                 error = failure.message;
             } catch (const std::exception&) {
@@ -898,6 +901,7 @@ void ShowTrayMenu(ResidentState& state) {
         return;
     }
     if (!AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") ||
+        !AppendMenuW(menu, MF_STRING, kPreviousCommandId, L"Previous") ||
         !AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit")) {
         const DWORD error = GetLastError();
         DestroyMenu(menu);
@@ -971,6 +975,9 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
         switch (LOWORD(wParam)) {
         case kNextCommandId:
             StartWallpaperChange(*state);
+            return 0;
+        case kPreviousCommandId:
+            StartWallpaperChange(*state, true);
             return 0;
         case kExitCommandId:
             RequestResidentExit(*state);

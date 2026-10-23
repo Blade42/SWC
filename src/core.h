@@ -202,4 +202,28 @@ inline std::vector<std::size_t> CandidateAttemptOrder(
     return order;
 }
 
+inline std::vector<std::size_t> PreviousCandidateAttemptOrder(
+    const std::vector<std::wstring>& sortedNames,
+    const std::wstring& lastImage) {
+    std::vector<std::size_t> order;
+    if (sortedNames.empty()) {
+        return order;
+    }
+
+    std::size_t start = sortedNames.size() - 1;
+    if (!lastImage.empty()) {
+        const auto previous = std::find(sortedNames.begin(), sortedNames.end(), lastImage);
+        if (previous != sortedNames.end()) {
+            const auto current = static_cast<std::size_t>(previous - sortedNames.begin());
+            start = current == 0 ? sortedNames.size() - 1 : current - 1;
+        }
+    }
+
+    order.reserve(sortedNames.size());
+    for (std::size_t offset = 0; offset < sortedNames.size(); ++offset) {
+        order.push_back((start + sortedNames.size() - offset) % sortedNames.size());
+    }
+    return order;
+}
+
 } // namespace swc
