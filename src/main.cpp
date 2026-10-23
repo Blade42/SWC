@@ -36,7 +36,8 @@ constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT kWallpaperChangeCompleteMessage = WM_APP + 2;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kNextCommandId = 1001;
-constexpr UINT kExitCommandId = 1002;
+constexpr UINT kPreviousCommandId = 1002;
+constexpr UINT kExitCommandId = 1003;
 constexpr UINT_PTR kWorkerPollTimerId = 1;
 
 template <typename T>
@@ -669,7 +670,7 @@ void WriteSettings(
     }
 }
 
-void Run() {
+void Run(bool previous = false) {
     const auto executableDirectory = ExecutableDirectory();
     const auto settingsPath = executableDirectory / L"settings.ini";
     const auto settings = ReadSettings(settingsPath);
@@ -706,6 +707,16 @@ void Run() {
     generated.reserve(displays.size());
     std::vector<std::filesystem::path> temporaryPaths;
     temporaryPaths.reserve(displays.size());
+    std::vector<std::filesystem::path> outputPaths;
+    outputPaths.reserve(displays.size());
+    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+        const std::wstring fileName = displayIndex == 0
+            ? L"wallpaper-background.png"
+            : L"wallpaper-background-" + std::to_wstring(displayIndex + 1) + L".png";
+        const auto outputPath = executableDirectory / fileName;
+        outputPaths.push_back(outputPath);
+        temporaryPaths.emplace_back(outputPath.wstring() + L".tmp");
+    }
     struct TemporaryFiles {
         std::vector<std::filesystem::path>& paths;
         ~TemporaryFiles() {
@@ -716,26 +727,20 @@ void Run() {
     } temporaryFiles{temporaryPaths};
 
     std::wstring lastImage = settings.lastImage;
-    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
-        const auto& display = displays[displayIndex];
-        const std::wstring fileName = displayIndex == 0
-            ? L"wallpaper-background.png"
-            : L"wallpaper-background-" + std::to_wstring(displayIndex + 1) + L".png";
-        const auto outputPath = executableDirectory / fileName;
-        const auto temporaryPath = std::filesystem::path(outputPath.wstring() + L".tmp");
-        temporaryPaths.push_back(temporaryPath);
-
+    const auto selectCandidate = [&](std::size_t displayIndex, const std::wstring& cursor) {
         std::vector<std::wstring> failures;
         std::size_t selectedIndex = images.size();
-        const auto order = swc::CandidateAttemptOrder(names, lastImage);
+        const auto order = previous
+            ? swc::PreviousCandidateAttemptOrder(names, cursor)
+            : swc::CandidateAttemptOrder(names, cursor);
         for (const std::size_t index : order) {
             try {
                 CreateBackgroundPng(
                     factory.Get(),
                     images[index],
-                    display.width,
-                    display.height,
-                    temporaryPath);
+                    displays[displayIndex].width,
+                    displays[displayIndex].height,
+                    temporaryPaths[displayIndex]);
                 selectedIndex = index;
                 break;
             } catch (const Failure& failure) {
@@ -755,8 +760,32 @@ void Run() {
             Fail(message);
         }
 
+        return selectedIndex;
+    };
+
+    const bool hasSavedCursor =
+        std::find(names.begin(), names.end(), lastImage) != names.end();
+    if (previous && hasSavedCursor) {
+        for (std::size_t skippedDisplay = 1; skippedDisplay < displays.size(); ++skippedDisplay) {
+            const auto currentSequenceImage = selectCandidate(0, lastImage);
+            lastImage = names[currentSequenceImage];
+        }
+    }
+
+    std::wstring lastDisplayImage = lastImage;
+    for (std::size_t offset = 0; offset < displays.size(); ++offset) {
+        const std::size_t displayIndex = previous
+            ? displays.size() - 1 - offset
+            : offset;
+        const std::size_t selectedIndex = selectCandidate(displayIndex, lastImage);
         lastImage = names[selectedIndex];
-        generated.push_back({display, temporaryPath, outputPath});
+        if (displayIndex == displays.size() - 1) {
+            lastDisplayImage = lastImage;
+        }
+        generated.push_back({
+            displays[displayIndex],
+            temporaryPaths[displayIndex],
+            outputPaths[displayIndex]});
     }
 
     for (const auto& item : generated) {
@@ -771,7 +800,7 @@ void Run() {
     for (const auto& item : generated) {
         ApplyWallpaper(wallpaper.Get(), item.display, item.outputPath);
     }
-    WriteSettings(settingsPath, settings, lastImage);
+    WriteSettings(settingsPath, settings, previous ? lastDisplayImage : lastImage);
 }
 
 void ShowError(const std::wstring& message, HWND owner = nullptr) {
@@ -846,7 +875,7 @@ void CompleteWallpaperChange(ResidentState& state) {
     }
 }
 
-void StartWallpaperChange(ResidentState& state) {
+void StartWallpaperChange(ResidentState& state, bool previous = false) {
     if (state.changeRunning) {
         ShowError(L"A wallpaper change is already in progress.", state.window);
         return;
@@ -860,10 +889,10 @@ void StartWallpaperChange(ResidentState& state) {
     }
 
     try {
-        state.changeThread = std::thread([&state]() {
+        state.changeThread = std::thread([&state, previous]() {
             std::wstring error;
             try {
-                Run();
+                Run(previous);
             } catch (const Failure& failure) {
                 error = failure.message;
             } catch (const std::exception&) {
@@ -898,6 +927,7 @@ void ShowTrayMenu(ResidentState& state) {
         return;
     }
     if (!AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") ||
+        !AppendMenuW(menu, MF_STRING, kPreviousCommandId, L"Previous") ||
         !AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit")) {
         const DWORD error = GetLastError();
         DestroyMenu(menu);
@@ -971,6 +1001,9 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
         switch (LOWORD(wParam)) {
         case kNextCommandId:
             StartWallpaperChange(*state);
+            return 0;
+        case kPreviousCommandId:
+            StartWallpaperChange(*state, true);
             return 0;
         case kExitCommandId:
             RequestResidentExit(*state);
