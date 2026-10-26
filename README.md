@@ -14,6 +14,8 @@ ctest --test-dir build --output-on-failure
 
 The executable is `build\simple-wallpaper-changer.exe`.
 
+In VS Code, select the **MinGW Makefiles** configure preset (`mingw`) from the CMake preset selector, then run **CMake: Build**.
+
 ## Settings
 
 Place `settings.ini` beside the executable. Values use `Identifier=value`; text after `;` and malformed lines are ignored. The recognized keys are:
@@ -36,7 +38,7 @@ Displays are processed primary-first. Each display gets the next readable image 
 
 WebP decoding depends on a WebP WIC decoder being installed and registered on the computer. Stock Windows 10 installations may not provide one. Without a registered decoder, WebP files are treated as unreadable and skipped; install the relevant Windows codec while online if WebP support is needed. JPG, JPEG, and PNG use Windows' built-in WIC codecs.
 
-Launching the executable starts a resident process and exits. Repeated launches do not create duplicate residents. The tray icon tooltip is **Simple Wallpaper Changer**. Right-click it to select **Next** to advance the image sequence, **Previous** to step backward through it, or **Exit** to remove the tray icon and stop the resident after any current wallpaper change has cleaned up. Previous walks backward past the images currently assigned to the earlier displays, then fills displays from last to first with preceding readable images. This makes Previous the inverse of Next across the complete multi-display sequence. Unreadable images are skipped and selection wraps from the first image to the last. If `last_image` is missing or stale, Previous starts at the last available candidate. The final display's selected image is saved to `last_image`.
+Launching the executable starts a resident process and exits. Repeated launches do not create duplicate residents. The tray icon tooltip is **Simple Wallpaper Changer**. Left-click the icon or choose **Settings...** from its right-click menu to open the settings window. The **Startup** tab controls `change_on_start`; the **Sources** tab shows the folder currently used and lets you choose another folder. Both settings are saved immediately. Close the window with **Close** or its title-bar X. The tray menu also offers **Next** to advance the image sequence, **Previous** to step backward through it, or **Exit** to remove the tray icon and stop the resident after any current wallpaper change has cleaned up. Previous walks backward past the images currently assigned to the earlier displays, then fills displays from last to first with preceding readable images. This makes Previous the inverse of Next across the complete multi-display sequence. Unreadable images are skipped and selection wraps from the first image to the last. If `last_image` is missing or stale, Previous starts at the last available candidate. The final display's selected image is saved to `last_image`.
 
 The tray icon is an original generic wallpaper-themed icon included in `src\tray-icon.ico`; it does not redistribute the linked stock photograph.
 

@@ -1,0 +1,29 @@
+{
+    "version": 2,
+    "configurePresets": [
+        {
+            "name": "mingw",
+            "displayName": "MinGW Makefiles",
+            "generator": "MinGW Makefiles",
+            "binaryDir": "${sourceDir}/build-cmake",
+            "cacheVariables": {
+                "BUILD_TESTING": "ON"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "mingw",
+            "configurePreset": "mingw"
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "mingw",
+            "configurePreset": "mingw",
+            "output": {
+                "outputOnFailure": true
+            }
+        }
+    ]
+}

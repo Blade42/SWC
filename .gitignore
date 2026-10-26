@@ -1,4 +1,11 @@
 build/wallpaper-background.png
 build/wallpaper-background-2.png
+/build/CMakeCache.txt
+/build/CMakeFiles/
+/build/CTestTestfile.cmake
+/build/DartConfiguration.tcl
+/build/Makefile
+/build/cmake_install.cmake
+/build/Testing/
 ~$quirements MVP.docx
 ~WRL0003.tmp
