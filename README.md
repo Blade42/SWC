@@ -14,6 +14,8 @@ ctest --test-dir build --output-on-failure
 
 The executable is `build\simple-wallpaper-changer.exe`.
 
+In VS Code, select the **MinGW Makefiles** configure preset (`mingw`) from the CMake preset selector, then run **CMake: Build**.
+
 ## Settings
 
 Place `settings.ini` beside the executable. Values use `Identifier=value`; text after `;` and malformed lines are ignored. The recognized keys are:
