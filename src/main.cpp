@@ -131,6 +131,19 @@ std::wstring FilesystemErrorText(const std::error_code& error) {
     Fail(operation + L": " + Win32Message(error));
 }
 
+HFONT CreateSettingsFont() {
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0)) {
+        FailWin32(L"Could not read the system interface font");
+    }
+    HFONT font = CreateFontIndirectW(&metrics.lfMessageFont);
+    if (!font) {
+        FailWin32(L"Could not create the settings interface font");
+    }
+    return font;
+}
+
 std::filesystem::path ExecutablePath() {
     std::vector<wchar_t> buffer(MAX_PATH);
     for (;;) {
@@ -857,6 +870,7 @@ struct ResidentState {
     HWND changeOnStartCheckbox = nullptr;
     HWND sourceDirectoryLabel = nullptr;
     HWND sourceDirectoryEdit = nullptr;
+    HFONT settingsFont = nullptr;
     std::filesystem::path settingsPath;
     swc::Settings settings;
     std::wstring settingsWindowError;
@@ -882,7 +896,8 @@ HWND CreateSettingsControl(
     int height,
     HWND parent,
     int controlId,
-    HINSTANCE instance) {
+    HINSTANCE instance,
+    HFONT font) {
     HWND control = CreateWindowExW(
         extendedStyle,
         className,
@@ -899,6 +914,7 @@ HWND CreateSettingsControl(
     if (!control) {
         FailWin32(L"Could not create a settings control");
     }
+    SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     return control;
 }
 
@@ -969,9 +985,11 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
     case WM_CREATE: {
         state->settingsWindow = window;
         try {
+            state->settingsFont = CreateSettingsFont();
             state->settingsTabs = CreateSettingsControl(
                 0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                12, 12, 460, 220, window, kSettingsTabsId, state->instance);
+                12, 12, 460, 220, window, kSettingsTabsId, state->instance,
+                state->settingsFont);
             wchar_t startupTabText[] = L"Startup";
             wchar_t sourcesTabText[] = L"Sources";
             TCITEMW tab{};
@@ -989,7 +1007,8 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->changeOnStartCheckbox = CreateSettingsControl(
                 0, L"BUTTON", L"Change wallpaper when the program starts",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-                30, 54, 420, 24, window, kChangeOnStartCheckboxId, state->instance);
+                30, 54, 420, 24, window, kChangeOnStartCheckboxId, state->instance,
+                state->settingsFont);
             SendMessageW(
                 state->changeOnStartCheckbox,
                 BM_SETCHECK,
@@ -999,19 +1018,23 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->sourceDirectoryLabel = CreateSettingsControl(
                 0, L"STATIC", L"Current source folder:",
                 WS_CHILD | SS_LEFT,
-                30, 52, 420, 20, window, kSourceDirectoryLabelId, state->instance);
+                30, 52, 420, 20, window, kSourceDirectoryLabelId, state->instance,
+                state->settingsFont);
             state->sourceDirectoryEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY,
-                30, 76, 350, 24, window, kSourceDirectoryEditId, state->instance);
+                30, 76, 350, 24, window, kSourceDirectoryEditId, state->instance,
+                state->settingsFont);
             CreateSettingsControl(
                 0, L"BUTTON", L"Browse...",
                 WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                388, 76, 82, 24, window, kBrowseSourceDirectoryButtonId, state->instance);
+                388, 76, 82, 24, window, kBrowseSourceDirectoryButtonId, state->instance,
+                state->settingsFont);
             CreateSettingsControl(
                 0, L"BUTTON", L"Close",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                388, 250, 82, 28, window, kCloseSettingsButtonId, state->instance);
+                388, 250, 82, 28, window, kCloseSettingsButtonId, state->instance,
+                state->settingsFont);
 
             const auto sourceDirectory = ResolveSourceDirectory(
                 state->settings.sourceDirectory,
@@ -1111,6 +1134,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->changeOnStartCheckbox = nullptr;
             state->sourceDirectoryLabel = nullptr;
             state->sourceDirectoryEdit = nullptr;
+            if (state->settingsFont) {
+                DeleteObject(state->settingsFont);
+                state->settingsFont = nullptr;
+            }
         }
         break;
     default:
