@@ -1,6 +1,7 @@
 #include "core.h"
 
 #include <windows.h>
+#include <commctrl.h>
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
@@ -32,13 +33,22 @@ struct Failure {
 
 constexpr wchar_t kResidentMutexName[] = L"Local\\SimpleWallpaperChanger.Resident";
 constexpr wchar_t kResidentWindowClass[] = L"SimpleWallpaperChangerResidentWindow";
+constexpr wchar_t kSettingsWindowClass[] = L"SimpleWallpaperChangerSettingsWindow";
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT kWallpaperChangeCompleteMessage = WM_APP + 2;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kNextCommandId = 1001;
 constexpr UINT kPreviousCommandId = 1002;
 constexpr UINT kExitCommandId = 1003;
+constexpr UINT kSettingsCommandId = 1004;
 constexpr UINT_PTR kWorkerPollTimerId = 1;
+constexpr int kSettingsTabsId = 2001;
+constexpr int kChangeOnStartCheckboxId = 2002;
+constexpr int kSourceDirectoryEditId = 2003;
+constexpr int kBrowseSourceDirectoryButtonId = 2004;
+constexpr int kCloseSettingsButtonId = 2005;
+constexpr int kSourceDirectoryLabelId = 2006;
+std::mutex gSettingsMutex;
 
 template <typename T>
 class ComPtr {
@@ -209,7 +219,7 @@ std::string WideToUtf8(const std::wstring& text) {
     return result;
 }
 
-swc::Settings ReadSettings(const std::filesystem::path& path) {
+swc::Settings ReadSettingsFile(const std::filesystem::path& path) {
     std::error_code error;
     const bool exists = std::filesystem::exists(path, error);
     if (error) {
@@ -236,6 +246,11 @@ swc::Settings ReadSettings(const std::filesystem::path& path) {
     }
     std::wistringstream input(content);
     return swc::ParseSettings(input);
+}
+
+swc::Settings ReadSettings(const std::filesystem::path& path) {
+    std::lock_guard<std::mutex> lock(gSettingsMutex);
+    return ReadSettingsFile(path);
 }
 
 std::filesystem::path CurrentDirectory() {
@@ -638,15 +653,20 @@ void ApplyWallpaper(
         L"Windows could not apply the wallpaper to a display");
 }
 
-void WriteSettings(
+void WriteSettingsFile(
     const std::filesystem::path& path,
-    const swc::Settings& settings,
-    const std::wstring& selectedImage) {
+    const swc::Settings& settings) {
     const std::wstring contents =
         L"source_directory=" + settings.sourceDirectory + L"\r\n" +
-        L"last_image=" + selectedImage + L"\r\n" +
+        L"last_image=" + settings.lastImage + L"\r\n" +
         L"change_on_start=" + (settings.changeOnStart ? L"true" : L"false") + L"\r\n";
     const std::filesystem::path temporary = path.wstring() + L".tmp";
+    struct TemporarySettingsFile {
+        const std::filesystem::path& path;
+        ~TemporarySettingsFile() {
+            DeleteFileW(path.c_str());
+        }
+    } temporaryFile{temporary};
     const std::string bytes = WideToUtf8(contents);
     {
         std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
@@ -665,9 +685,27 @@ void WriteSettings(
             path.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         const DWORD error = GetLastError();
-        DeleteFileW(temporary.c_str());
         FailWin32(L"Could not update settings.ini", error);
     }
+}
+
+void UpdateUserSettings(
+    const std::filesystem::path& path,
+    const swc::Settings& preferences) {
+    std::lock_guard<std::mutex> lock(gSettingsMutex);
+    auto settings = ReadSettingsFile(path);
+    settings.sourceDirectory = preferences.sourceDirectory;
+    settings.changeOnStart = preferences.changeOnStart;
+    WriteSettingsFile(path, settings);
+}
+
+void UpdateLastImageSettings(
+    const std::filesystem::path& path,
+    const std::wstring& lastImage) {
+    std::lock_guard<std::mutex> lock(gSettingsMutex);
+    auto settings = ReadSettingsFile(path);
+    settings.lastImage = lastImage;
+    WriteSettingsFile(path, settings);
 }
 
 void Run(bool previous = false) {
@@ -800,7 +838,7 @@ void Run(bool previous = false) {
     for (const auto& item : generated) {
         ApplyWallpaper(wallpaper.Get(), item.display, item.outputPath);
     }
-    WriteSettings(settingsPath, settings, previous ? lastDisplayImage : lastImage);
+    UpdateLastImageSettings(settingsPath, previous ? lastDisplayImage : lastImage);
 }
 
 void ShowError(const std::wstring& message, HWND owner = nullptr) {
@@ -814,6 +852,14 @@ void ShowError(const std::wstring& message, HWND owner = nullptr) {
 struct ResidentState {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
+    HWND settingsWindow = nullptr;
+    HWND settingsTabs = nullptr;
+    HWND changeOnStartCheckbox = nullptr;
+    HWND sourceDirectoryLabel = nullptr;
+    HWND sourceDirectoryEdit = nullptr;
+    std::filesystem::path settingsPath;
+    swc::Settings settings;
+    std::wstring settingsWindowError;
     NOTIFYICONDATAW icon{};
     bool iconAdded = false;
     bool changeRunning = false;
@@ -824,6 +870,287 @@ struct ResidentState {
     std::wstring changeError;
     std::wstring startupError;
 };
+
+HWND CreateSettingsControl(
+    DWORD extendedStyle,
+    const wchar_t* className,
+    const wchar_t* text,
+    DWORD style,
+    int x,
+    int y,
+    int width,
+    int height,
+    HWND parent,
+    int controlId,
+    HINSTANCE instance) {
+    HWND control = CreateWindowExW(
+        extendedStyle,
+        className,
+        text,
+        style,
+        x,
+        y,
+        width,
+        height,
+        parent,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(controlId)),
+        instance,
+        nullptr);
+    if (!control) {
+        FailWin32(L"Could not create a settings control");
+    }
+    return control;
+}
+
+void ShowSettingsPage(ResidentState& state) {
+    const bool startupPage = TabCtrl_GetCurSel(state.settingsTabs) == 0;
+    ShowWindow(state.changeOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.sourceDirectoryLabel, startupPage ? SW_HIDE : SW_SHOW);
+    ShowWindow(state.sourceDirectoryEdit, startupPage ? SW_HIDE : SW_SHOW);
+    ShowWindow(GetDlgItem(state.settingsWindow, kBrowseSourceDirectoryButtonId),
+        startupPage ? SW_HIDE : SW_SHOW);
+}
+
+std::wstring SelectSourceDirectory(HWND owner, const std::wstring& currentDirectory) {
+    ComPtr<IFileOpenDialog> dialog;
+    CheckHr(
+        CoCreateInstance(
+            CLSID_FileOpenDialog,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(dialog.Put())),
+        L"Could not open the source folder selector");
+
+    FILEOPENDIALOGOPTIONS options = 0;
+    CheckHr(dialog->GetOptions(&options), L"Could not configure the source folder selector");
+    CheckHr(
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST),
+        L"Could not configure the source folder selector");
+    CheckHr(dialog->SetTitle(L"Select wallpaper source folder"),
+        L"Could not set the source folder selector title");
+
+    ComPtr<IShellItem> initialFolder;
+    const HRESULT initialFolderResult = SHCreateItemFromParsingName(
+        currentDirectory.c_str(),
+        nullptr,
+        IID_PPV_ARGS(initialFolder.Put()));
+    CheckHr(initialFolderResult, L"Could not locate the current source folder");
+    CheckHr(dialog->SetFolder(initialFolder.Get()),
+        L"Could not select the current source folder");
+
+    const HRESULT showResult = dialog->Show(owner);
+    if (showResult == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        return {};
+    }
+    CheckHr(showResult, L"Could not show the source folder selector");
+
+    ComPtr<IShellItem> selectedFolder;
+    CheckHr(dialog->GetResult(selectedFolder.Put()),
+        L"Could not read the selected source folder");
+    PWSTR rawPath = nullptr;
+    CheckHr(selectedFolder->GetDisplayName(SIGDN_FILESYSPATH, &rawPath),
+        L"Could not read the selected source folder path");
+    std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> selectedPath(rawPath, CoTaskMemFree);
+    if (!selectedPath) {
+        Fail(L"The selected source folder path is empty.");
+    }
+    return selectedPath.get();
+}
+
+LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<ResidentState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* creation = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = static_cast<ResidentState*>(creation->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+
+    switch (message) {
+    case WM_CREATE: {
+        state->settingsWindow = window;
+        try {
+            state->settingsTabs = CreateSettingsControl(
+                0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                12, 12, 460, 220, window, kSettingsTabsId, state->instance);
+            wchar_t startupTabText[] = L"Startup";
+            wchar_t sourcesTabText[] = L"Sources";
+            TCITEMW tab{};
+            tab.mask = TCIF_TEXT;
+            tab.pszText = startupTabText;
+            if (TabCtrl_InsertItem(state->settingsTabs, 0, &tab) == -1) {
+                Fail(L"Could not add the Startup settings tab.");
+            }
+            tab.pszText = sourcesTabText;
+            if (TabCtrl_InsertItem(state->settingsTabs, 1, &tab) == -1) {
+                Fail(L"Could not add the Sources settings tab.");
+            }
+            TabCtrl_SetCurSel(state->settingsTabs, 0);
+
+            state->changeOnStartCheckbox = CreateSettingsControl(
+                0, L"BUTTON", L"Change wallpaper when the program starts",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                30, 54, 420, 24, window, kChangeOnStartCheckboxId, state->instance);
+            SendMessageW(
+                state->changeOnStartCheckbox,
+                BM_SETCHECK,
+                state->settings.changeOnStart ? BST_CHECKED : BST_UNCHECKED,
+                0);
+
+            state->sourceDirectoryLabel = CreateSettingsControl(
+                0, L"STATIC", L"Current source folder:",
+                WS_CHILD | SS_LEFT,
+                30, 52, 420, 20, window, kSourceDirectoryLabelId, state->instance);
+            state->sourceDirectoryEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY,
+                30, 76, 350, 24, window, kSourceDirectoryEditId, state->instance);
+            CreateSettingsControl(
+                0, L"BUTTON", L"Browse...",
+                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                388, 76, 82, 24, window, kBrowseSourceDirectoryButtonId, state->instance);
+            CreateSettingsControl(
+                0, L"BUTTON", L"Close",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                388, 250, 82, 28, window, kCloseSettingsButtonId, state->instance);
+
+            const auto sourceDirectory = ResolveSourceDirectory(
+                state->settings.sourceDirectory,
+                ExecutableDirectory());
+            SetWindowTextW(state->sourceDirectoryEdit, sourceDirectory.c_str());
+            ShowSettingsPage(*state);
+        } catch (const Failure& failure) {
+            state->settingsWindowError = failure.message;
+            return -1;
+        } catch (const std::exception&) {
+            state->settingsWindowError = L"Could not initialize the settings window.";
+            return -1;
+        }
+        return 0;
+    }
+    case WM_NOTIFY:
+        if (state && reinterpret_cast<const NMHDR*>(lParam)->hwndFrom == state->settingsTabs &&
+            reinterpret_cast<const NMHDR*>(lParam)->code == TCN_SELCHANGE) {
+            ShowSettingsPage(*state);
+            return 0;
+        }
+        break;
+    case WM_COMMAND:
+        if (!state) {
+            break;
+        }
+        switch (LOWORD(wParam)) {
+        case kChangeOnStartCheckboxId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                auto updated = state->settings;
+                updated.changeOnStart =
+                    SendMessageW(state->changeOnStartCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                try {
+                    UpdateUserSettings(state->settingsPath, updated);
+                    state->settings = std::move(updated);
+                } catch (const Failure& failure) {
+                    SendMessageW(
+                        state->changeOnStartCheckbox,
+                        BM_SETCHECK,
+                        state->settings.changeOnStart ? BST_CHECKED : BST_UNCHECKED,
+                        0);
+                    ShowError(failure.message, window);
+                } catch (const std::exception&) {
+                    SendMessageW(
+                        state->changeOnStartCheckbox,
+                        BM_SETCHECK,
+                        state->settings.changeOnStart ? BST_CHECKED : BST_UNCHECKED,
+                        0);
+                    ShowError(L"Could not save the Startup setting.", window);
+                }
+                return 0;
+            }
+            break;
+        case kBrowseSourceDirectoryButtonId:
+            try {
+                const int currentDirectoryLength =
+                    GetWindowTextLengthW(state->sourceDirectoryEdit);
+                std::wstring currentDirectory(
+                    static_cast<std::size_t>(currentDirectoryLength) + 1, L'\0');
+                GetWindowTextW(
+                    state->sourceDirectoryEdit,
+                    currentDirectory.data(),
+                    currentDirectoryLength + 1);
+                currentDirectory.resize(static_cast<std::size_t>(currentDirectoryLength));
+                const auto selectedDirectory = SelectSourceDirectory(
+                    window, currentDirectory);
+                if (!selectedDirectory.empty()) {
+                    auto updated = state->settings;
+                    updated.sourceDirectory = selectedDirectory;
+                    UpdateUserSettings(state->settingsPath, updated);
+                    state->settings = std::move(updated);
+                    SetWindowTextW(state->sourceDirectoryEdit, selectedDirectory.c_str());
+                }
+            } catch (const Failure& failure) {
+                ShowError(failure.message, window);
+            } catch (const std::exception&) {
+                ShowError(L"Could not save the Sources setting.", window);
+            }
+            return 0;
+        case kCloseSettingsButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                SendMessageW(window, WM_CLOSE, 0, 0);
+                return 0;
+            }
+            break;
+        default:
+            break;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(window);
+        return 0;
+    case WM_NCDESTROY:
+        if (state && state->settingsWindow == window) {
+            state->settingsWindow = nullptr;
+            state->settingsTabs = nullptr;
+            state->changeOnStartCheckbox = nullptr;
+            state->sourceDirectoryLabel = nullptr;
+            state->sourceDirectoryEdit = nullptr;
+        }
+        break;
+    default:
+        break;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+void ShowSettingsWindow(ResidentState& state) {
+    if (state.settingsWindow) {
+        ShowWindow(state.settingsWindow, SW_SHOWNORMAL);
+        SetForegroundWindow(state.settingsWindow);
+        return;
+    }
+
+    state.settingsWindowError.clear();
+    HWND window = CreateWindowExW(
+        WS_EX_DLGMODALFRAME,
+        kSettingsWindowClass,
+        L"Settings - Simple Wallpaper Changer",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
+        CW_USEDEFAULT,
+        CW_USEDEFAULT,
+        500,
+        330,
+        state.window,
+        nullptr,
+        state.instance,
+        &state);
+    if (!window) {
+        ShowError(
+            state.settingsWindowError.empty()
+                ? L"Could not create the settings window: " + Win32Message(GetLastError())
+                : state.settingsWindowError,
+            state.window);
+        return;
+    }
+    ShowWindow(window, SW_SHOWNORMAL);
+    SetForegroundWindow(window);
+}
 
 bool AddTrayIcon(ResidentState& state) {
     state.icon = {};
@@ -928,6 +1255,7 @@ void ShowTrayMenu(ResidentState& state) {
     }
     if (!AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") ||
         !AppendMenuW(menu, MF_STRING, kPreviousCommandId, L"Previous") ||
+        !AppendMenuW(menu, MF_STRING, kSettingsCommandId, L"Settings...") ||
         !AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit")) {
         const DWORD error = GetLastError();
         DestroyMenu(menu);
@@ -966,6 +1294,9 @@ void RequestResidentExit(ResidentState& state) {
         state.changeThread.join();
     }
     state.changeRunning = false;
+    if (state.settingsWindow) {
+        DestroyWindow(state.settingsWindow);
+    }
     RemoveTrayIcon(state);
     DestroyWindow(state.window);
 }
@@ -992,9 +1323,12 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
         }
         return 0;
     case kTrayCallbackMessage:
-        if (wParam == kTrayIconId &&
-            (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)) {
-            ShowTrayMenu(*state);
+        if (wParam == kTrayIconId) {
+            if (lParam == WM_LBUTTONUP || lParam == NIN_SELECT || lParam == NIN_KEYSELECT) {
+                ShowSettingsWindow(*state);
+            } else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+                ShowTrayMenu(*state);
+            }
         }
         return 0;
     case WM_COMMAND:
@@ -1004,6 +1338,9 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
             return 0;
         case kPreviousCommandId:
             StartWallpaperChange(*state, true);
+            return 0;
+        case kSettingsCommandId:
+            ShowSettingsWindow(*state);
             return 0;
         case kExitCommandId:
             RequestResidentExit(*state);
@@ -1036,9 +1373,39 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
 }
 
 int RunResident(HINSTANCE instance) {
-    const auto settings = ReadSettings(ExecutableDirectory() / L"settings.ini");
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    CheckHr(comResult, L"Could not initialize the settings window");
+    struct ComUninitializer {
+        ~ComUninitializer() {
+            CoUninitialize();
+        }
+    } comUninitializer;
+
+    const auto settingsPath = ExecutableDirectory() / L"settings.ini";
+    const auto settings = ReadSettings(settingsPath);
     ResidentState state;
     state.instance = instance;
+    state.settingsPath = settingsPath;
+    state.settings = settings;
+
+    INITCOMMONCONTROLSEX commonControls{};
+    commonControls.dwSize = sizeof(commonControls);
+    commonControls.dwICC = ICC_TAB_CLASSES;
+    if (!InitCommonControlsEx(&commonControls)) {
+        FailWin32(L"Could not initialize the settings tabs");
+    }
+
+    WNDCLASSEXW settingsWindowClass{};
+    settingsWindowClass.cbSize = sizeof(settingsWindowClass);
+    settingsWindowClass.lpfnWndProc = SettingsWindowProc;
+    settingsWindowClass.hInstance = instance;
+    settingsWindowClass.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_TRAY_ICON));
+    settingsWindowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    settingsWindowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
+    settingsWindowClass.lpszClassName = kSettingsWindowClass;
+    if (!RegisterClassExW(&settingsWindowClass)) {
+        FailWin32(L"Could not register the settings window");
+    }
 
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
