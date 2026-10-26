@@ -1,0 +1,3 @@
+C:\Users\Blade\AppData\Local\Microsoft\WinGet\Packages\Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe\cmake-4.4.4-windows-x86_64\bin\cmake.exe -E rm -f CMakeFiles\simple-wallpaper-changer.dir/objects.a
+"C:\Program Files\MySys2\ucrt64\bin\ar.exe" qc CMakeFiles\simple-wallpaper-changer.dir/objects.a @CMakeFiles\simple-wallpaper-changer.dir\objects1.rsp
+"C:\Program Files\MySys2\ucrt64\bin\c++.exe" -mwindows -Wl,--whole-archive CMakeFiles\simple-wallpaper-changer.dir/objects.a -Wl,--no-whole-archive -o simple-wallpaper-changer.exe -Wl,--out-implib,libsimple-wallpaper-changer.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles\simple-wallpaper-changer.dir\linkLibs.rsp
