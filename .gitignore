@@ -8,5 +8,9 @@ settings.ini
 /build/Makefile
 /build/cmake_install.cmake
 /build/Testing/
+# Generated build outputs; keep the distributable sample settings file.
+/build/*
+!/build/settings.sample.ini
+/build-cmake/
 ~$quirements MVP.docx
 ~WRL0003.tmp
