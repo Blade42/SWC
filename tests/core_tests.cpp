@@ -10,15 +10,53 @@ int main() {
     {
         std::wistringstream input(
             L"; whole-line comment\n"
-            L"source_directory = C:\\Wallpapers ; inline comment\n"
+            L"source_directories = C:\\Wallpapers ; inline comment\n"
             L"last_image=two.jpg\n"
             L"not an assignment\n"
             L"ignored=value\n"
             L"last_image=three=final.png\n");
         const auto settings = swc::ParseSettings(input);
-        assert(settings.sourceDirectory == L"C:\\Wallpapers");
+        assert(settings.sourceDirectories.size() == 1);
+        assert(settings.sourceDirectories[0].path == L"C:\\Wallpapers");
+        assert(settings.sourceDirectories[0].enabled);
         assert(settings.lastImage == L"three=final.png");
         assert(settings.changeOnStart);
+    }
+
+    {
+        std::wistringstream input(
+            L"source_directories=C:\\First\n"
+            L"source_directories=-D:\\Disabled\n"
+            L"source_directories=E:\\First\n"
+            L"source_directories=C:\\First\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.sourceDirectories.size() == 4);
+        assert(settings.sourceDirectories[0].path == L"C:\\First");
+        assert(settings.sourceDirectories[0].enabled);
+        assert(settings.sourceDirectories[1].path == L"D:\\Disabled");
+        assert(!settings.sourceDirectories[1].enabled);
+        assert(settings.sourceDirectories[2].path == L"E:\\First");
+        assert(settings.sourceDirectories[2].enabled);
+        assert(settings.sourceDirectories[3].path == L"C:\\First");
+        assert(settings.sourceDirectories[3].enabled);
+        assert(swc::SerializeSourceDirectory(settings.sourceDirectories[1]) == L"-D:\\Disabled");
+        assert(swc::HasEnabledSourceDirectory(settings.sourceDirectories));
+        assert(!swc::HasEnabledSourceDirectory({}));
+        assert(!swc::HasEnabledSourceDirectory({{L"C:\\First", false}}));
+    }
+
+    {
+        std::wistringstream input(
+            L"; a comment\n"
+            L"source_directories=C:\\Wallpapers ; inline comment\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.sourceDirectories.size() == 1);
+        assert(settings.sourceDirectories[0].path == L"C:\\Wallpapers");
+    }
+
+    {
+        std::wistringstream input(L"source_directory=C:\\Legacy\n");
+        assert(swc::ParseSettings(input).sourceDirectories.empty());
     }
 
     {
@@ -104,6 +142,17 @@ int main() {
     assert((swc::PreviousCandidateAttemptOrder(names, L"missing.jpg") ==
         std::vector<std::size_t>{2, 1, 0}));
     assert(swc::PreviousCandidateAttemptOrder({}, L"").empty());
+
+    {
+        const std::vector<std::wstring> sourcesInListOrder = {
+            L"0|C:\\First\\1.jpg",
+            L"0|C:\\First\\2.jpg",
+            L"2|D:\\Second\\1.jpg"};
+        assert((swc::CandidateAttemptOrder(sourcesInListOrder, L"") ==
+            std::vector<std::size_t>{0, 1, 2}));
+        assert((swc::CandidateAttemptOrder(sourcesInListOrder, L"0|C:\\First\\1.jpg") ==
+            std::vector<std::size_t>{1, 2, 0}));
+    }
 
     {
         const std::vector<std::wstring> sequence = {

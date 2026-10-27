@@ -21,18 +21,22 @@ In VS Code, select the **MinGW Makefiles** configure preset (`mingw`) from the C
 Place `settings.ini` beside the executable. You can rename the included `settings.sample.ini` to `settings.ini`, or let the program create a default `settings.ini` automatically on its first run. Values use `Identifier=value`; lines beginning with `;` are comments, and malformed lines are ignored. The recognized keys are:
 
 ```ini
-; Folder containing wallpaper images. Relative paths are based on the executable folder.
-; An empty or unavailable folder falls back to the current working folder.
-source_directory=C:\Users\Example\Pictures\Wallpapers
+; Add one source_directories entry for each folder, in the order they should be scanned.
+; Prefix a path with - to disable that folder. Duplicate folders are allowed.
+source_directories=C:\Users\Example\Pictures\Wallpapers
+source_directories=-D:\SeasonalWallpapers
+source_directories=E:\MoreWallpapers
 
-; Last selected image. The program updates this automatically.
-last_image=wallpaper2.jpg
+; Last image identity, maintained automatically by the program.
+last_image=
 
 ; Change wallpapers once when the program starts: true or false.
 change_on_start=true
 ```
 
-`change_on_start` accepts `true` or `false`, case-insensitively. It defaults to `true` when missing or invalid. When true, the resident changes wallpapers once after starting; when false, it waits for the tray menu's **Next** command. An empty or unavailable source directory falls back to the process current directory. Relative source paths are resolved from the executable directory. If `last_image` is missing or not present in the folder, selection starts at the first image.
+`change_on_start` accepts `true` or `false`, case-insensitively. It defaults to `true` when missing or invalid. When true, the resident changes wallpapers once after starting; when false, it waits for the tray menu's **Next** command. Source directories are scanned in list order, and images within each directory use Windows logical filename ordering; duplicate directory entries intentionally repeat their candidates. Relative source paths are resolved from the executable directory. If all source folders are disabled or no source entries are present, the process current directory is used. Unavailable configured folders are skipped; if every enabled folder is unavailable, the program reports those folders. The `last_image` value is an internal identity maintained automatically by the program. If it is missing or no longer matches an image, selection starts at the first candidate.
+
+The previous single `source_directory` setting is not recognized; use the repeated `source_directories` entries shown above.
 
 Supported filename extensions are `.jpg`, `.jpeg`, `.png`, and `.webp`, case-insensitively. Files are sorted with Windows logical filename ordering. If a selected image cannot be decoded, the program tries subsequent images in order.
 
@@ -40,12 +44,12 @@ Supported filename extensions are `.jpg`, `.jpeg`, `.png`, and `.webp`, case-ins
 
 One PNG is generated beside the executable for each connected display. The primary display uses `wallpaper-background.png`; additional displays use `wallpaper-background-2.png`, `wallpaper-background-3.png`, and so on. Each image is created at that display's current resolution, with its source scaled to fit fully and centered. Any uncovered area is filled with a color estimated from the image: a border-weighted dominant color, sampled from a small thumbnail. Fully transparent pixels are ignored and partially transparent pixels contribute in proportion to their opacity. The Windows per-monitor desktop wallpaper API applies each generated image to its corresponding display.
 
-Displays are processed primary-first. Each display gets the next readable image in the sorted sequence; unreadable images are skipped as before. The sequence wraps and may reuse images if there are fewer readable images than displays. `last_image` records the final image assigned, so the next run continues after the full display sequence. Generated wallpaper PNGs are not considered source images.
+Displays are processed primary-first. Each display gets the next readable image in the combined sequence: each source folder's logically sorted images appended in configured folder order. Unreadable images are skipped as before. The sequence wraps and may reuse images if there are fewer readable images than displays. `last_image` records the final image assigned, so the next run continues after the full display sequence. Generated wallpaper PNGs are not considered source images.
 
 WebP decoding depends on a WebP WIC decoder being installed and registered on the computer. Stock Windows 10 installations may not provide one. Without a registered decoder, WebP files are treated as unreadable and skipped; install the relevant Windows codec while online if WebP support is needed. JPG, JPEG, and PNG use Windows' built-in WIC codecs.
 
-Launching the executable starts a resident process and exits. Repeated launches do not create duplicate residents. The tray icon tooltip is **Simple Wallpaper Changer**. Left-click the icon or choose **Settings...** from its right-click menu to open the settings window. The **Startup** tab controls `change_on_start`; the **Sources** tab shows the folder currently used and lets you choose another folder. Both settings are saved immediately. Close the window with **Close** or its title-bar X. The tray menu also offers **Next** to advance the image sequence, **Previous** to step backward through it, or **Exit** to remove the tray icon and stop the resident after any current wallpaper change has cleaned up. Previous walks backward past the images currently assigned to the earlier displays, then fills displays from last to first with preceding readable images. This makes Previous the inverse of Next across the complete multi-display sequence. Unreadable images are skipped and selection wraps from the first image to the last. If `last_image` is missing or stale, Previous starts at the last available candidate. The final display's selected image is saved to `last_image`.
+Launching the executable starts a resident process and exits. Repeated launches do not create duplicate residents. The tray icon tooltip is **Simple Wallpaper Changer**. Left-click the icon or choose **Settings...** from its right-click menu to open the settings window. The **Startup** tab controls `change_on_start`; the **Sources** tab lets you add folders with the picker or by dropping folders from Explorer, remove folders, drag rows to reorder them, and toggle each folder on or off. All settings are saved immediately. Close the window with **Close** or its title-bar X. The tray menu also offers **Next** to advance the image sequence, **Previous** to step backward through it, or **Exit** to remove the tray icon and stop the resident after any current wallpaper change has cleaned up. Previous walks backward past the images currently assigned to the earlier displays, then fills displays from last to first with preceding readable images. This makes Previous the inverse of Next across the complete multi-display sequence. Unreadable images are skipped and selection wraps from the first image to the last. If `last_image` is missing or stale, Previous starts at the last available candidate. The final display's selected image is saved to `last_image`.
 
 The tray icon is an original generic wallpaper-themed icon included in `src\tray-icon.ico`; it does not redistribute the linked stock photograph.
 
-If the folder contains no supported image files, a wallpaper change ends without changing the wallpaper or settings. If every supported image is missing or unreadable, it reports an error and leaves `last_image` unchanged; the resident remains available for another attempt.
+If the combined source sequence contains no supported image files, a wallpaper change ends without changing the wallpaper or settings. If every supported image is missing or unreadable, it reports an error and leaves `last_image` unchanged; the resident remains available for another attempt.

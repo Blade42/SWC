@@ -1,6 +1,7 @@
 #include "core.h"
 
 #include <windows.h>
+#include <windowsx.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlwapi.h>
@@ -44,10 +45,11 @@ constexpr UINT kSettingsCommandId = 1004;
 constexpr UINT_PTR kWorkerPollTimerId = 1;
 constexpr int kSettingsTabsId = 2001;
 constexpr int kChangeOnStartCheckboxId = 2002;
-constexpr int kSourceDirectoryEditId = 2003;
-constexpr int kBrowseSourceDirectoryButtonId = 2004;
+constexpr int kSourceDirectoryListId = 2003;
+constexpr int kAddSourceDirectoryButtonId = 2004;
 constexpr int kCloseSettingsButtonId = 2005;
-constexpr int kSourceDirectoryLabelId = 2006;
+constexpr int kRemoveSourceDirectoryButtonId = 2006;
+constexpr int kSourceDirectoryHintId = 2007;
 std::mutex gSettingsMutex;
 
 template <typename T>
@@ -275,28 +277,6 @@ std::filesystem::path CurrentDirectory() {
     return path;
 }
 
-std::filesystem::path ResolveSourceDirectory(
-    const std::wstring& configuredDirectory,
-    const std::filesystem::path& executableDirectory) {
-    if (configuredDirectory.empty()) {
-        return CurrentDirectory();
-    }
-
-    std::filesystem::path source(configuredDirectory);
-    if (source.is_relative()) {
-        source = executableDirectory / source;
-    }
-
-    std::error_code error;
-    if (std::filesystem::is_directory(source, error) && !error) {
-        const auto absolute = std::filesystem::absolute(source, error);
-        if (!error) {
-            return absolute;
-        }
-    }
-    return CurrentDirectory();
-}
-
 bool StartsWithWindowsText(const std::wstring& text, const std::wstring& prefix) {
     return text.size() >= prefix.size() &&
         CompareStringOrdinal(
@@ -378,6 +358,74 @@ std::vector<std::filesystem::path> FindImages(
             static_cast<int>(rightName.size()),
             FALSE) == CSTR_LESS_THAN;
     });
+    return images;
+}
+
+struct SourceImage {
+    std::filesystem::path path;
+    std::size_t sourceIndex;
+};
+
+std::vector<SourceImage> FindSourceImages(
+    const std::vector<swc::SourceDirectory>& sourceDirectories,
+    const std::filesystem::path& executableDirectory) {
+    if (!swc::HasEnabledSourceDirectory(sourceDirectories)) {
+        std::vector<SourceImage> images;
+        for (auto& image : FindImages(CurrentDirectory())) {
+            images.push_back({std::move(image), 0});
+        }
+        return images;
+    }
+
+    std::vector<SourceImage> images;
+    std::vector<std::wstring> failures;
+    bool sourceScanned = false;
+    for (std::size_t index = 0; index < sourceDirectories.size(); ++index) {
+        const auto& directory = sourceDirectories[index];
+        if (!directory.enabled) {
+            continue;
+        }
+
+        std::filesystem::path source(directory.path);
+        if (source.is_relative()) {
+            source = executableDirectory / source;
+        }
+
+        std::error_code error;
+        if (!std::filesystem::is_directory(source, error) || error) {
+            const std::wstring reason = error
+                ? FilesystemErrorText(error)
+                : L"folder does not exist";
+            failures.push_back(directory.path + L": " + reason);
+            continue;
+        }
+        const auto absolute = std::filesystem::absolute(source, error);
+        if (error) {
+            failures.push_back(directory.path + L": " + FilesystemErrorText(error));
+            continue;
+        }
+
+        try {
+            auto directoryImages = FindImages(absolute);
+            sourceScanned = true;
+            for (auto& image : directoryImages) {
+                images.push_back({std::move(image), index});
+            }
+        } catch (const Failure& failure) {
+            failures.push_back(directory.path + L": " + failure.message);
+        }
+    }
+
+    if (!sourceScanned && !failures.empty()) {
+        std::wstring message = L"Could not read any enabled source folder.";
+        for (std::size_t index = 0; index < failures.size() && index < 8; ++index) {
+            message += L"\r\n\r\n" + failures[index];
+        }
+        if (failures.size() > 8) {
+            message += L"\r\n\r\nAdditional source folders could not be read.";
+        }
+        Fail(message);
+    }
     return images;
 }
 
@@ -669,17 +717,22 @@ void ApplyWallpaper(
 void WriteSettingsFile(
     const std::filesystem::path& path,
     const swc::Settings& settings) {
-    const std::wstring contents =
+    std::wstring contents =
         L"; Folder to read wallpaper images from. Relative paths use the executable folder.\r\n"
-        L"; If empty or unavailable, the current working folder is used.\r\n"
-        L"source_directory=" + settings.sourceDirectory + L"\r\n" +
-        L"; Last image used; maintained automatically by the program.\r\n"
+        L"; If all folders are disabled or none are listed, the working folder is used.\r\n"
+        L"; Prefix a path with - to disable it. Entries are tried in list order.\r\n";
+    for (const auto& directory : settings.sourceDirectories) {
+        contents += L"source_directories=" + swc::SerializeSourceDirectory(directory) + L"\r\n";
+    }
+    contents +=
+        L"; Last image identity; maintained automatically by the program.\r\n"
         L"last_image=" + settings.lastImage + L"\r\n" +
         L"; Change wallpapers once when the program starts: true or false.\r\n"
         L"change_on_start=" + (settings.changeOnStart ? L"true" : L"false") + L"\r\n"
         L"; Example configuration:\r\n"
-        L"; source_directory=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
-        L"; last_image=wallpaper2.jpg\r\n"
+        L"; source_directories=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
+        L"; source_directories=-D:\\SeasonalWallpapers\r\n"
+        L"; last_image=0|C:\\Users\\Example\\Pictures\\Wallpapers\\wallpaper2.jpg\r\n"
         L"; change_on_start=false\r\n";
     const std::filesystem::path temporary = path.wstring() + L".tmp";
     struct TemporarySettingsFile {
@@ -727,7 +780,7 @@ void UpdateUserSettings(
     const swc::Settings& preferences) {
     std::lock_guard<std::mutex> lock(gSettingsMutex);
     auto settings = ReadSettingsFile(path);
-    settings.sourceDirectory = preferences.sourceDirectory;
+    settings.sourceDirectories = preferences.sourceDirectories;
     settings.changeOnStart = preferences.changeOnStart;
     WriteSettingsFile(path, settings);
 }
@@ -745,9 +798,7 @@ void Run(bool previous = false) {
     const auto executableDirectory = ExecutableDirectory();
     const auto settingsPath = executableDirectory / L"settings.ini";
     const auto settings = ReadSettings(settingsPath);
-    const auto sourceDirectory =
-        ResolveSourceDirectory(settings.sourceDirectory, executableDirectory);
-    const auto images = FindImages(sourceDirectory);
+    const auto images = FindSourceImages(settings.sourceDirectories, executableDirectory);
     if (images.empty()) {
         return;
     }
@@ -765,7 +816,28 @@ void Run(bool previous = false) {
     std::vector<std::wstring> names;
     names.reserve(images.size());
     for (const auto& image : images) {
-        names.push_back(image.filename().wstring());
+        names.push_back(std::to_wstring(image.sourceIndex) + L"|" + image.path.wstring());
+    }
+
+    std::wstring savedCursor = settings.lastImage;
+    if (std::find(names.begin(), names.end(), savedCursor) == names.end()) {
+        if (!settings.lastImage.empty()) {
+            const auto legacyImage = std::find_if(
+                images.begin(),
+                images.end(),
+                [&](const SourceImage& image) {
+                    const auto fileName = image.path.filename().wstring();
+                    return CompareStringOrdinal(
+                        fileName.data(),
+                        static_cast<int>(fileName.size()),
+                        settings.lastImage.data(),
+                        static_cast<int>(settings.lastImage.size()),
+                        TRUE) == CSTR_EQUAL;
+                });
+            if (legacyImage != images.end()) {
+                savedCursor = names[static_cast<std::size_t>(legacyImage - images.begin())];
+            }
+        }
     }
 
     auto factory = CreateImagingFactory();
@@ -797,7 +869,7 @@ void Run(bool previous = false) {
         }
     } temporaryFiles{temporaryPaths};
 
-    std::wstring lastImage = settings.lastImage;
+    std::wstring lastImage = savedCursor;
     const auto selectCandidate = [&](std::size_t displayIndex, const std::wstring& cursor) {
         std::vector<std::wstring> failures;
         std::size_t selectedIndex = images.size();
@@ -808,14 +880,14 @@ void Run(bool previous = false) {
             try {
                 CreateBackgroundPng(
                     factory.Get(),
-                    images[index],
+                    images[index].path,
                     displays[displayIndex].width,
                     displays[displayIndex].height,
                     temporaryPaths[displayIndex]);
                 selectedIndex = index;
                 break;
             } catch (const Failure& failure) {
-                failures.push_back(names[index] + L": " + failure.message);
+                failures.push_back(images[index].path.wstring() + L": " + failure.message);
             }
         }
 
@@ -888,12 +960,15 @@ struct ResidentState {
     HWND settingsWindow = nullptr;
     HWND settingsTabs = nullptr;
     HWND changeOnStartCheckbox = nullptr;
-    HWND sourceDirectoryLabel = nullptr;
-    HWND sourceDirectoryEdit = nullptr;
+    HWND sourceDirectoryList = nullptr;
+    HWND sourceDirectoryHint = nullptr;
     HFONT settingsFont = nullptr;
     std::filesystem::path settingsPath;
     swc::Settings settings;
     std::wstring settingsWindowError;
+    bool refreshingSourceList = false;
+    int draggingSourceIndex = -1;
+    int sourceDropIndex = -1;
     NOTIFYICONDATAW icon{};
     bool iconAdded = false;
     bool changeRunning = false;
@@ -904,6 +979,35 @@ struct ResidentState {
     std::wstring changeError;
     std::wstring startupError;
 };
+
+void RefreshSourceDirectoryList(ResidentState& state) {
+    state.refreshingSourceList = true;
+    ListView_DeleteAllItems(state.sourceDirectoryList);
+    for (std::size_t index = 0; index < state.settings.sourceDirectories.size(); ++index) {
+        const auto& directory = state.settings.sourceDirectories[index];
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = static_cast<int>(index);
+        item.pszText = const_cast<wchar_t*>(directory.path.c_str());
+        const int row = ListView_InsertItem(state.sourceDirectoryList, &item);
+        if (row < 0) {
+            state.refreshingSourceList = false;
+            Fail(L"Could not display the source folder list.");
+        }
+        ListView_SetCheckState(state.sourceDirectoryList, row, directory.enabled);
+    }
+    state.refreshingSourceList = false;
+}
+
+void SaveSourceDirectoryList(
+    ResidentState& state,
+    std::vector<swc::SourceDirectory> directories) {
+    auto updated = state.settings;
+    updated.sourceDirectories = std::move(directories);
+    UpdateUserSettings(state.settingsPath, updated);
+    state.settings = std::move(updated);
+    RefreshSourceDirectoryList(state);
+}
 
 HWND CreateSettingsControl(
     DWORD extendedStyle,
@@ -941,10 +1045,101 @@ HWND CreateSettingsControl(
 void ShowSettingsPage(ResidentState& state) {
     const bool startupPage = TabCtrl_GetCurSel(state.settingsTabs) == 0;
     ShowWindow(state.changeOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
-    ShowWindow(state.sourceDirectoryLabel, startupPage ? SW_HIDE : SW_SHOW);
-    ShowWindow(state.sourceDirectoryEdit, startupPage ? SW_HIDE : SW_SHOW);
-    ShowWindow(GetDlgItem(state.settingsWindow, kBrowseSourceDirectoryButtonId),
+    ShowWindow(state.sourceDirectoryList, startupPage ? SW_HIDE : SW_SHOW);
+    ShowWindow(state.sourceDirectoryHint, startupPage ? SW_HIDE : SW_SHOW);
+    ShowWindow(GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
         startupPage ? SW_HIDE : SW_SHOW);
+    ShowWindow(GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId),
+        startupPage ? SW_HIDE : SW_SHOW);
+}
+
+void SaveSourceDirectoryListWithError(
+    ResidentState& state,
+    std::vector<swc::SourceDirectory> directories,
+    HWND owner) {
+    try {
+        SaveSourceDirectoryList(state, std::move(directories));
+    } catch (const Failure& failure) {
+        RefreshSourceDirectoryList(state);
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        RefreshSourceDirectoryList(state);
+        ShowError(L"Could not save the source folder list.", owner);
+    }
+}
+
+LRESULT CALLBACK SourceListDropSubclass(
+    HWND list,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam,
+    UINT_PTR subclassId,
+    DWORD_PTR) {
+    if (message == WM_DROPFILES) {
+        SendMessageW(GetParent(list), WM_DROPFILES, wParam, lParam);
+        return 0;
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(list, SourceListDropSubclass, subclassId);
+    }
+    return DefSubclassProc(list, message, wParam, lParam);
+}
+
+void AddSourceDirectories(
+    ResidentState& state,
+    const std::vector<std::filesystem::path>& paths,
+    HWND owner) {
+    auto directories = state.settings.sourceDirectories;
+    std::vector<std::wstring> failures;
+    for (const auto& path : paths) {
+        std::error_code error;
+        if (!std::filesystem::is_directory(path, error) || error) {
+            failures.push_back(path.wstring() + L": not an accessible folder");
+            continue;
+        }
+        const auto absolute = std::filesystem::absolute(path, error);
+        if (error) {
+            failures.push_back(path.wstring() + L": " + FilesystemErrorText(error));
+            continue;
+        }
+        directories.push_back({absolute.wstring(), true});
+    }
+
+    if (directories.size() != state.settings.sourceDirectories.size()) {
+        SaveSourceDirectoryListWithError(state, std::move(directories), owner);
+    }
+    if (!failures.empty()) {
+        std::wstring message = L"Some dropped items could not be added as source folders.";
+        for (std::size_t index = 0; index < failures.size() && index < 8; ++index) {
+            message += L"\r\n\r\n" + failures[index];
+        }
+        if (failures.size() > 8) {
+            message += L"\r\n\r\nAdditional dropped items were not folders.";
+        }
+        ShowError(message, owner);
+    }
+}
+
+void ReorderSourceDirectory(
+    ResidentState& state,
+    int from,
+    int insertionIndex,
+    HWND owner) {
+    auto directories = state.settings.sourceDirectories;
+    if (from < 0 || static_cast<std::size_t>(from) >= directories.size()) {
+        return;
+    }
+    insertionIndex = std::clamp(insertionIndex, 0, static_cast<int>(directories.size()));
+    auto directory = std::move(directories[static_cast<std::size_t>(from)]);
+    directories.erase(directories.begin() + from);
+    if (from < insertionIndex) {
+        --insertionIndex;
+    }
+    insertionIndex = std::clamp(insertionIndex, 0, static_cast<int>(directories.size()));
+    directories.insert(directories.begin() + insertionIndex, std::move(directory));
+    if (directories != state.settings.sourceDirectories) {
+        SaveSourceDirectoryListWithError(state, std::move(directories), owner);
+    }
 }
 
 std::wstring SelectSourceDirectory(HWND owner, const std::wstring& currentDirectory) {
@@ -1008,7 +1203,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->settingsFont = CreateSettingsFont();
             state->settingsTabs = CreateSettingsControl(
                 0, WC_TABCONTROLW, L"", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
-                12, 12, 460, 220, window, kSettingsTabsId, state->instance,
+                12, 12, 480, 300, window, kSettingsTabsId, state->instance,
                 state->settingsFont);
             wchar_t startupTabText[] = L"Startup";
             wchar_t sourcesTabText[] = L"Sources";
@@ -1035,31 +1230,52 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 state->settings.changeOnStart ? BST_CHECKED : BST_UNCHECKED,
                 0);
 
-            state->sourceDirectoryLabel = CreateSettingsControl(
-                0, L"STATIC", L"Current source folder:",
-                WS_CHILD | SS_LEFT,
-                30, 52, 420, 20, window, kSourceDirectoryLabelId, state->instance,
+            state->sourceDirectoryList = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                28, 48, 448, 190, window, kSourceDirectoryListId, state->instance,
                 state->settingsFont);
-            state->sourceDirectoryEdit = CreateSettingsControl(
-                WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_TABSTOP | ES_AUTOHSCROLL | ES_READONLY,
-                30, 76, 350, 24, window, kSourceDirectoryEditId, state->instance,
+            if (!SetWindowSubclass(
+                    state->sourceDirectoryList, SourceListDropSubclass, 1, 0)) {
+                FailWin32(L"Could not enable folder drops on the source list");
+            }
+            DragAcceptFiles(state->sourceDirectoryList, TRUE);
+            ListView_SetExtendedListViewStyle(
+                state->sourceDirectoryList,
+                LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES |
+                    LVS_EX_DOUBLEBUFFER);
+            wchar_t sourceColumnText[] = L"Source folder (drag rows to reorder)";
+            LVCOLUMNW sourceColumn{};
+            sourceColumn.mask = LVCF_TEXT | LVCF_WIDTH;
+            sourceColumn.pszText = sourceColumnText;
+            sourceColumn.cx = 425;
+            if (ListView_InsertColumn(state->sourceDirectoryList, 0, &sourceColumn) == -1) {
+                Fail(L"Could not create the source folder list column.");
+            }
+            CreateSettingsControl(
+                0, L"BUTTON", L"Add folder...",
+                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                28, 248, 110, 26, window, kAddSourceDirectoryButtonId, state->instance,
                 state->settingsFont);
             CreateSettingsControl(
-                0, L"BUTTON", L"Browse...",
+                0, L"BUTTON", L"Remove",
                 WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
-                388, 76, 82, 24, window, kBrowseSourceDirectoryButtonId, state->instance,
+                148, 248, 90, 26, window, kRemoveSourceDirectoryButtonId, state->instance,
+                state->settingsFont);
+            state->sourceDirectoryHint = CreateSettingsControl(
+                0, L"STATIC",
+                L"Drop folders here to add them. Uncheck all folders to use the working folder.",
+                WS_CHILD | SS_LEFT,
+                28, 282, 448, 32, window, kSourceDirectoryHintId, state->instance,
                 state->settingsFont);
             CreateSettingsControl(
                 0, L"BUTTON", L"Close",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                388, 250, 82, 28, window, kCloseSettingsButtonId, state->instance,
+                394, 326, 82, 28, window, kCloseSettingsButtonId, state->instance,
                 state->settingsFont);
 
-            const auto sourceDirectory = ResolveSourceDirectory(
-                state->settings.sourceDirectory,
-                ExecutableDirectory());
-            SetWindowTextW(state->sourceDirectoryEdit, sourceDirectory.c_str());
+            RefreshSourceDirectoryList(*state);
+            DragAcceptFiles(window, TRUE);
             ShowSettingsPage(*state);
         } catch (const Failure& failure) {
             state->settingsWindowError = failure.message;
@@ -1071,10 +1287,40 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         return 0;
     }
     case WM_NOTIFY:
-        if (state && reinterpret_cast<const NMHDR*>(lParam)->hwndFrom == state->settingsTabs &&
-            reinterpret_cast<const NMHDR*>(lParam)->code == TCN_SELCHANGE) {
-            ShowSettingsPage(*state);
-            return 0;
+        if (state) {
+            const auto* notification = reinterpret_cast<const NMHDR*>(lParam);
+            if (notification->hwndFrom == state->settingsTabs &&
+                notification->code == TCN_SELCHANGE) {
+                ShowSettingsPage(*state);
+                return 0;
+            }
+            if (notification->hwndFrom == state->sourceDirectoryList) {
+                if (notification->code == LVN_ITEMCHANGED && !state->refreshingSourceList) {
+                    const auto* change = reinterpret_cast<const NMLISTVIEW*>(lParam);
+                    const UINT oldImage =
+                        (change->uOldState & LVIS_STATEIMAGEMASK) >> 12;
+                    const UINT newImage =
+                        (change->uNewState & LVIS_STATEIMAGEMASK) >> 12;
+                    if ((change->uChanged & LVIF_STATE) != 0 &&
+                        oldImage != newImage &&
+                        change->iItem >= 0 &&
+                        static_cast<std::size_t>(change->iItem) <
+                            state->settings.sourceDirectories.size()) {
+                        auto directories = state->settings.sourceDirectories;
+                        directories[static_cast<std::size_t>(change->iItem)].enabled =
+                            ListView_GetCheckState(state->sourceDirectoryList, change->iItem) != FALSE;
+                        SaveSourceDirectoryListWithError(*state, std::move(directories), window);
+                    }
+                    return 0;
+                }
+                if (notification->code == LVN_BEGINDRAG) {
+                    const auto* drag = reinterpret_cast<const NMLISTVIEW*>(lParam);
+                    state->draggingSourceIndex = drag->iItem;
+                    state->sourceDropIndex = drag->iItem;
+                    SetCapture(window);
+                    return 0;
+                }
+            }
         }
         break;
     case WM_COMMAND:
@@ -1108,32 +1354,49 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 return 0;
             }
             break;
-        case kBrowseSourceDirectoryButtonId:
+        case kAddSourceDirectoryButtonId:
             try {
-                const int currentDirectoryLength =
-                    GetWindowTextLengthW(state->sourceDirectoryEdit);
-                std::wstring currentDirectory(
-                    static_cast<std::size_t>(currentDirectoryLength) + 1, L'\0');
-                GetWindowTextW(
-                    state->sourceDirectoryEdit,
-                    currentDirectory.data(),
-                    currentDirectoryLength + 1);
-                currentDirectory.resize(static_cast<std::size_t>(currentDirectoryLength));
+                std::filesystem::path initialDirectory = CurrentDirectory();
+                const int selectedRow = ListView_GetNextItem(
+                    state->sourceDirectoryList, -1, LVNI_SELECTED);
+                if (selectedRow >= 0 &&
+                    static_cast<std::size_t>(selectedRow) <
+                        state->settings.sourceDirectories.size()) {
+                    const auto& selected =
+                        state->settings.sourceDirectories[static_cast<std::size_t>(selectedRow)];
+                    std::filesystem::path selectedPath(selected.path);
+                    if (selectedPath.is_relative()) {
+                        selectedPath = ExecutableDirectory() / selectedPath;
+                    }
+                    std::error_code error;
+                    if (std::filesystem::is_directory(selectedPath, error) && !error) {
+                        initialDirectory = std::move(selectedPath);
+                    }
+                }
                 const auto selectedDirectory = SelectSourceDirectory(
-                    window, currentDirectory);
+                    window, initialDirectory.wstring());
                 if (!selectedDirectory.empty()) {
-                    auto updated = state->settings;
-                    updated.sourceDirectory = selectedDirectory;
-                    UpdateUserSettings(state->settingsPath, updated);
-                    state->settings = std::move(updated);
-                    SetWindowTextW(state->sourceDirectoryEdit, selectedDirectory.c_str());
+                    AddSourceDirectories(
+                        *state, {std::filesystem::path(selectedDirectory)}, window);
                 }
             } catch (const Failure& failure) {
                 ShowError(failure.message, window);
             } catch (const std::exception&) {
-                ShowError(L"Could not save the Sources setting.", window);
+                ShowError(L"Could not add the source folder.", window);
             }
             return 0;
+        case kRemoveSourceDirectoryButtonId: {
+            const int selectedRow = ListView_GetNextItem(
+                state->sourceDirectoryList, -1, LVNI_SELECTED);
+            if (selectedRow >= 0 &&
+                static_cast<std::size_t>(selectedRow) <
+                    state->settings.sourceDirectories.size()) {
+                auto directories = state->settings.sourceDirectories;
+                directories.erase(directories.begin() + selectedRow);
+                SaveSourceDirectoryListWithError(*state, std::move(directories), window);
+            }
+            return 0;
+        }
         case kCloseSettingsButtonId:
             if (HIWORD(wParam) == BN_CLICKED) {
                 SendMessageW(window, WM_CLOSE, 0, 0);
@@ -1144,6 +1407,74 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
         }
         break;
+    case WM_MOUSEMOVE:
+            if (state && state->draggingSourceIndex >= 0) {
+                POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                ClientToScreen(window, &point);
+                ScreenToClient(state->sourceDirectoryList, &point);
+                LVHITTESTINFO hit{};
+                hit.pt = point;
+                const int row = ListView_HitTest(state->sourceDirectoryList, &hit);
+                if (row < 0) {
+                    state->sourceDropIndex =
+                        point.y < 0
+                            ? 0
+                            : static_cast<int>(state->settings.sourceDirectories.size());
+                } else {
+                    RECT rowRect{};
+                    ListView_GetItemRect(state->sourceDirectoryList, row, &rowRect, LVIR_BOUNDS);
+                    state->sourceDropIndex =
+                        row + (point.y >= (rowRect.top + rowRect.bottom) / 2 ? 1 : 0);
+                    ListView_SetItemState(
+                        state->sourceDirectoryList, row, LVIS_SELECTED, LVIS_SELECTED);
+                }
+                return 0;
+            }
+            break;
+    case WM_LBUTTONUP:
+            if (state && state->draggingSourceIndex >= 0) {
+                ReleaseCapture();
+                ReorderSourceDirectory(
+                    *state,
+                    state->draggingSourceIndex,
+                    state->sourceDropIndex,
+                    window);
+                state->draggingSourceIndex = -1;
+                state->sourceDropIndex = -1;
+                return 0;
+            }
+            break;
+    case WM_DROPFILES:
+            if (state) {
+                HDROP drop = reinterpret_cast<HDROP>(wParam);
+                try {
+                    const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+                    std::vector<std::filesystem::path> paths;
+                    paths.reserve(count);
+                    for (UINT index = 0; index < count; ++index) {
+                        const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+                        std::wstring path(static_cast<std::size_t>(length) + 1, L'\0');
+                        DragQueryFileW(drop, index, path.data(), length + 1);
+                        path.resize(length);
+                        paths.emplace_back(std::move(path));
+                    }
+                    DragFinish(drop);
+                    drop = nullptr;
+                    AddSourceDirectories(*state, paths, window);
+                } catch (const Failure& failure) {
+                    if (drop) {
+                        DragFinish(drop);
+                    }
+                    ShowError(failure.message, window);
+                } catch (const std::exception&) {
+                    if (drop) {
+                        DragFinish(drop);
+                    }
+                    ShowError(L"Could not add the dropped source folders.", window);
+                }
+                return 0;
+            }
+            break;
     case WM_CLOSE:
         DestroyWindow(window);
         return 0;
@@ -1152,8 +1483,8 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->settingsWindow = nullptr;
             state->settingsTabs = nullptr;
             state->changeOnStartCheckbox = nullptr;
-            state->sourceDirectoryLabel = nullptr;
-            state->sourceDirectoryEdit = nullptr;
+            state->sourceDirectoryList = nullptr;
+            state->sourceDirectoryHint = nullptr;
             if (state->settingsFont) {
                 DeleteObject(state->settingsFont);
                 state->settingsFont = nullptr;
@@ -1181,8 +1512,8 @@ void ShowSettingsWindow(ResidentState& state) {
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        500,
-        330,
+        520,
+        400,
         state.window,
         nullptr,
         state.instance,
@@ -1438,7 +1769,7 @@ int RunResident(HINSTANCE instance) {
 
     INITCOMMONCONTROLSEX commonControls{};
     commonControls.dwSize = sizeof(commonControls);
-    commonControls.dwICC = ICC_TAB_CLASSES;
+    commonControls.dwICC = ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES;
     if (!InitCommonControlsEx(&commonControls)) {
         FailWin32(L"Could not initialize the settings tabs");
     }

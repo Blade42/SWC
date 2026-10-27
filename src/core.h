@@ -11,11 +11,46 @@
 
 namespace swc {
 
+struct SourceDirectory {
+    std::wstring path;
+    bool enabled = true;
+};
+
+inline bool operator==(const SourceDirectory& left, const SourceDirectory& right) {
+    return left.path == right.path && left.enabled == right.enabled;
+}
+
+inline bool operator!=(const SourceDirectory& left, const SourceDirectory& right) {
+    return !(left == right);
+}
+
 struct Settings {
-    std::wstring sourceDirectory;
+    std::vector<SourceDirectory> sourceDirectories;
     std::wstring lastImage;
     bool changeOnStart = true;
 };
+
+inline bool HasEnabledSourceDirectory(
+    const std::vector<SourceDirectory>& sourceDirectories) {
+    return std::any_of(
+        sourceDirectories.begin(),
+        sourceDirectories.end(),
+        [](const SourceDirectory& directory) { return directory.enabled; });
+}
+
+inline SourceDirectory ParseSourceDirectory(std::wstring value) {
+    SourceDirectory directory;
+    if (!value.empty() && value.front() == L'-') {
+        directory.enabled = false;
+        value.erase(value.begin());
+    }
+    directory.path = std::move(value);
+    return directory;
+}
+
+inline std::wstring SerializeSourceDirectory(const SourceDirectory& directory) {
+    return (directory.enabled ? L"" : L"-") + directory.path;
+}
 
 struct FitRect {
     std::uint32_t left;
@@ -146,8 +181,10 @@ inline Settings ParseSettings(std::wistream& input) {
         if (comment != std::wstring::npos) {
             line.erase(comment);
         }
-
         line = Trim(std::move(line));
+        if (line.empty() || line.front() == L';') {
+            continue;
+        }
         const auto separator = line.find(L'=');
         if (separator == std::wstring::npos) {
             continue;
@@ -155,8 +192,10 @@ inline Settings ParseSettings(std::wistream& input) {
 
         const auto identifier = Trim(line.substr(0, separator));
         const auto value = Trim(line.substr(separator + 1));
-        if (identifier == L"source_directory") {
-            settings.sourceDirectory = value;
+        if (identifier == L"source_directories") {
+            if (!value.empty()) {
+                settings.sourceDirectories.push_back(ParseSourceDirectory(value));
+            }
         } else if (identifier == L"last_image") {
             settings.lastImage = value;
         } else if (identifier == L"change_on_start") {
