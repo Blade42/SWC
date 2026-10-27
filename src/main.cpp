@@ -68,6 +68,8 @@ constexpr wchar_t kMonitorPreviewPanelClass[] = L"SWCMonitorPreviewPanel";
 constexpr wchar_t kPlaylistDragGhostClass[] = L"SWCPlaylistDragGhost";
 constexpr int kPlaylistDragGhostWidth = 110;
 constexpr int kPlaylistDragGhostHeight = 104;
+constexpr int kSourceDragGhostWidth = 220;
+constexpr int kSourceDragGhostHeight = 64;
 std::mutex gSettingsMutex;
 
 template <typename T>
@@ -1977,7 +1979,43 @@ LRESULT CALLBACK PlaylistDragGhostProc(
             SelectObject(dc, previousPen);
             DeleteObject(border);
 
-            if (state->draggingPlaylistRow >= 0 &&
+            if (state->draggingSourceIndex >= 0 &&
+                static_cast<std::size_t>(state->draggingSourceIndex) <
+                    state->settings.sourceDirectories.size()) {
+                RECT folder{12, 19, 34, 39};
+                HBRUSH folderBrush = CreateSolidBrush(RGB(245, 196, 66));
+                HPEN folderPen = CreatePen(PS_SOLID, 1, RGB(149, 104, 20));
+                HGDIOBJ previousBrush = SelectObject(dc, folderBrush);
+                HGDIOBJ previousPen = SelectObject(dc, folderPen);
+                POINT folderShape[] = {
+                    {folder.left, folder.top + 4},
+                    {folder.left + 7, folder.top + 4},
+                    {folder.left + 9, folder.top},
+                    {folder.right, folder.top},
+                    {folder.right, folder.bottom},
+                    {folder.left, folder.bottom}};
+                Polygon(dc, folderShape, static_cast<int>(std::size(folderShape)));
+                SelectObject(dc, previousPen);
+                SelectObject(dc, previousBrush);
+                DeleteObject(folderPen);
+                DeleteObject(folderBrush);
+
+                const std::filesystem::path sourcePath(
+                    state->settings.sourceDirectories[
+                        static_cast<std::size_t>(state->draggingSourceIndex)].path);
+                const std::wstring name = sourcePath.filename().empty()
+                    ? sourcePath.wstring()
+                    : sourcePath.filename().wstring();
+                RECT label{42, 4, client.right - 8, client.bottom - 4};
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, RGB(255, 255, 255));
+                DrawTextW(
+                    dc,
+                    name.c_str(),
+                    -1,
+                    &label,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            } else if (state->draggingPlaylistRow >= 0 &&
                 state->playlistImageList &&
                 static_cast<std::size_t>(state->draggingPlaylistRow) <
                     state->playlistSources.size()) {
@@ -2021,7 +2059,7 @@ LRESULT CALLBACK PlaylistDragGhostProc(
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-void PositionPlaylistDragGhost(ResidentState& state) {
+void PositionDragGhost(ResidentState& state) {
     if (!state.playlistDragGhost || !IsWindow(state.playlistDragGhost)) {
         return;
     }
@@ -2029,17 +2067,31 @@ void PositionPlaylistDragGhost(ResidentState& state) {
     if (!GetCursorPos(&cursor)) {
         return;
     }
+    const bool draggingSource = state.draggingSourceIndex >= 0;
+    const int width = draggingSource
+        ? kSourceDragGhostWidth
+        : kPlaylistDragGhostWidth;
+    const int height = draggingSource
+        ? kSourceDragGhostHeight
+        : kPlaylistDragGhostHeight;
     SetWindowPos(
         state.playlistDragGhost,
         HWND_TOPMOST,
         cursor.x + 18,
         cursor.y + 18,
-        kPlaylistDragGhostWidth,
-        kPlaylistDragGhostHeight,
+        width,
+        height,
         SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
-void StartPlaylistDragGhost(ResidentState& state) {
+void StartDragGhost(ResidentState& state) {
+    const bool draggingSource = state.draggingSourceIndex >= 0;
+    const int width = draggingSource
+        ? kSourceDragGhostWidth
+        : kPlaylistDragGhostWidth;
+    const int height = draggingSource
+        ? kSourceDragGhostHeight
+        : kPlaylistDragGhostHeight;
     state.playlistDragGhost = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW |
             WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -2048,8 +2100,8 @@ void StartPlaylistDragGhost(ResidentState& state) {
         WS_POPUP,
         0,
         0,
-        kPlaylistDragGhostWidth,
-        kPlaylistDragGhostHeight,
+        width,
+        height,
         state.settingsWindow,
         nullptr,
         state.instance,
@@ -2067,7 +2119,7 @@ void StartPlaylistDragGhost(ResidentState& state) {
         state.playlistDragGhost = nullptr;
         FailWin32(L"Could not configure the Playlist drag preview", error);
     }
-    PositionPlaylistDragGhost(state);
+    PositionDragGhost(state);
 }
 
 void StopPlaylistDragGhost(ResidentState& state) {
@@ -2811,6 +2863,91 @@ void ReorderSourceDirectory(
     }
 }
 
+int SourceDirectoryInsertionIndex(
+    const ResidentState& state,
+    POINT point) {
+    RECT client{};
+    if (!GetClientRect(state.sourceDirectoryList, &client) ||
+        point.x < client.left || point.x >= client.right ||
+        point.y < client.top || point.y >= client.bottom) {
+        return -1;
+    }
+
+    const int count = ListView_GetItemCount(state.sourceDirectoryList);
+    if (count == 0) {
+        return 0;
+    }
+
+    for (int row = 0; row < count; ++row) {
+        RECT rowRect{};
+        if (!ListView_GetItemRect(
+                state.sourceDirectoryList, row, &rowRect, LVIR_BOUNDS)) {
+            return -1;
+        }
+        if (point.y < rowRect.top) {
+            return row;
+        }
+        if (point.y < rowRect.bottom) {
+            return row + (point.y >= (rowRect.top + rowRect.bottom) / 2 ? 1 : 0);
+        }
+    }
+    return count;
+}
+
+void DrawSourceDirectoryInsertionMark(
+    HDC dc,
+    HWND list,
+    int insertionIndex) {
+    const int count = ListView_GetItemCount(list);
+    if (insertionIndex < 0 || insertionIndex > count) {
+        return;
+    }
+
+    int y = 0;
+    if (insertionIndex < count) {
+        RECT rowRect{};
+        if (!ListView_GetItemRect(list, insertionIndex, &rowRect, LVIR_BOUNDS)) {
+            return;
+        }
+        y = rowRect.top;
+    } else if (count > 0) {
+        RECT rowRect{};
+        if (!ListView_GetItemRect(list, count - 1, &rowRect, LVIR_BOUNDS)) {
+            return;
+        }
+        y = rowRect.bottom;
+    } else {
+        return;
+    }
+
+    RECT client{};
+    if (!GetClientRect(list, &client)) {
+        return;
+    }
+    const int markerY = std::clamp(
+        y,
+        static_cast<int>(client.top),
+        static_cast<int>(client.bottom - 1));
+    HPEN pen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
+    HGDIOBJ previousPen = SelectObject(dc, pen);
+    MoveToEx(dc, client.left + 2, markerY, nullptr);
+    LineTo(dc, client.right - 2, markerY);
+    SelectObject(dc, previousPen);
+    DeleteObject(pen);
+
+    POINT arrow[] = {
+        {client.left + 1, markerY - 4},
+        {client.left + 6, markerY},
+        {client.left + 1, markerY + 4}};
+    HBRUSH brush = CreateSolidBrush(RGB(0, 120, 215));
+    HGDIOBJ previousBrush = SelectObject(dc, brush);
+    previousPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    Polygon(dc, arrow, static_cast<int>(std::size(arrow)));
+    SelectObject(dc, previousPen);
+    SelectObject(dc, previousBrush);
+    DeleteObject(brush);
+}
+
 std::wstring SelectSourceDirectory(HWND owner, const std::wstring& currentDirectory) {
     ComPtr<IFileOpenDialog> dialog;
     CheckHr(
@@ -3140,10 +3277,45 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 }
                 if (notification->code == LVN_BEGINDRAG) {
                     const auto* drag = reinterpret_cast<const NMLISTVIEW*>(lParam);
+                    if (drag->iItem < 0 ||
+                        static_cast<std::size_t>(drag->iItem) >=
+                            state->settings.sourceDirectories.size()) {
+                        return 0;
+                    }
                     state->draggingSourceIndex = drag->iItem;
-                    state->sourceDropIndex = drag->iItem;
+                    state->sourceDropIndex = -1;
+                    InvalidateRect(state->sourceDirectoryList, nullptr, TRUE);
+                    try {
+                        StartDragGhost(*state);
+                    } catch (const Failure& failure) {
+                        ShowError(failure.message, window);
+                    } catch (const std::exception&) {
+                        ShowError(L"Could not show the source-folder drag preview.", window);
+                    }
                     SetCapture(window);
+                    SetCursor(LoadCursorW(nullptr, IDC_NO));
                     return 0;
+                }
+                if (notification->code == NM_CUSTOMDRAW) {
+                    auto* draw = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+                    if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                        return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+                    }
+                    if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT &&
+                        static_cast<int>(draw->nmcd.dwItemSpec) ==
+                            state->draggingSourceIndex) {
+                        draw->clrTextBk = RGB(255, 222, 125);
+                        draw->clrText = RGB(35, 38, 42);
+                        return CDRF_NEWFONT;
+                    }
+                    if (draw->nmcd.dwDrawStage == CDDS_POSTPAINT &&
+                        state->draggingSourceIndex >= 0) {
+                        DrawSourceDirectoryInsertionMark(
+                            draw->nmcd.hdc,
+                            state->sourceDirectoryList,
+                            state->sourceDropIndex);
+                    }
+                    return CDRF_DODEFAULT;
                 }
             }
             if (notification->hwndFrom == state->playlistList) {
@@ -3158,7 +3330,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                         state->monitorDropTarget = -1;
                         InvalidateRect(state->playlistList, nullptr, TRUE);
                         try {
-                            StartPlaylistDragGhost(*state);
+                            StartDragGhost(*state);
                         } catch (const Failure& failure) {
                             ShowError(failure.message, window);
                         } catch (const std::exception&) {
@@ -3304,22 +3476,14 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                 ClientToScreen(window, &point);
                 ScreenToClient(state->sourceDirectoryList, &point);
-                LVHITTESTINFO hit{};
-                hit.pt = point;
-                const int row = ListView_HitTest(state->sourceDirectoryList, &hit);
-                if (row < 0) {
-                    state->sourceDropIndex =
-                        point.y < 0
-                            ? 0
-                            : static_cast<int>(state->settings.sourceDirectories.size());
-                } else {
-                    RECT rowRect{};
-                    ListView_GetItemRect(state->sourceDirectoryList, row, &rowRect, LVIR_BOUNDS);
-                    state->sourceDropIndex =
-                        row + (point.y >= (rowRect.top + rowRect.bottom) / 2 ? 1 : 0);
-                    ListView_SetItemState(
-                        state->sourceDirectoryList, row, LVIS_SELECTED, LVIS_SELECTED);
+                const int target = SourceDirectoryInsertionIndex(*state, point);
+                if (target != state->sourceDropIndex) {
+                    state->sourceDropIndex = target;
+                    InvalidateRect(state->sourceDirectoryList, nullptr, TRUE);
                 }
+                PositionDragGhost(*state);
+                SetCursor(LoadCursorW(
+                    nullptr, target >= 0 ? IDC_SIZEALL : IDC_NO));
                 return 0;
             }
             if (state && !state->draggingPlaylistImage.empty()) {
@@ -3331,19 +3495,40 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                     state->monitorDropTarget = target;
                     InvalidateRect(state->monitorPreviewPanel, nullptr, TRUE);
                 }
-                PositionPlaylistDragGhost(*state);
+                PositionDragGhost(*state);
                 SetPlaylistDragCursor(*state);
                 return 0;
             }
             break;
     case WM_SETCURSOR:
+            if (state && state->draggingSourceIndex >= 0) {
+                SetCursor(LoadCursorW(
+                    nullptr,
+                    state->sourceDropIndex >= 0 ? IDC_SIZEALL : IDC_NO));
+                PositionDragGhost(*state);
+                return TRUE;
+            }
             if (state && !state->draggingPlaylistImage.empty()) {
                 SetPlaylistDragCursor(*state);
-                PositionPlaylistDragGhost(*state);
+                PositionDragGhost(*state);
                 return TRUE;
             }
             break;
     case WM_LBUTTONUP:
+            if (state && state->draggingSourceIndex >= 0) {
+                const int from = state->draggingSourceIndex;
+                const int insertionIndex = state->sourceDropIndex;
+                state->draggingSourceIndex = -1;
+                state->sourceDropIndex = -1;
+                StopPlaylistDragGhost(*state);
+                InvalidateRect(state->sourceDirectoryList, nullptr, TRUE);
+                ReleaseCapture();
+                if (insertionIndex >= 0) {
+                    ReorderSourceDirectory(
+                        *state, from, insertionIndex, window);
+                }
+                return 0;
+            }
             if (state && !state->draggingPlaylistImage.empty()) {
                 POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                 ClientToScreen(window, &point);
@@ -3369,19 +3554,15 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 }
                 return 0;
             }
-            if (state && state->draggingSourceIndex >= 0) {
-                ReleaseCapture();
-                ReorderSourceDirectory(
-                    *state,
-                    state->draggingSourceIndex,
-                    state->sourceDropIndex,
-                    window);
-                state->draggingSourceIndex = -1;
-                state->sourceDropIndex = -1;
-                return 0;
-            }
             break;
     case WM_CAPTURECHANGED:
+            if (state && state->draggingSourceIndex >= 0) {
+                state->draggingSourceIndex = -1;
+                state->sourceDropIndex = -1;
+                StopPlaylistDragGhost(*state);
+                InvalidateRect(state->sourceDirectoryList, nullptr, TRUE);
+                return 0;
+            }
             if (state && !state->draggingPlaylistImage.empty()) {
                 state->draggingPlaylistImage.clear();
                 state->draggingPlaylistRow = -1;
