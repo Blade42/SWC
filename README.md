@@ -18,11 +18,17 @@ In VS Code, select the **MinGW Makefiles** configure preset (`mingw`) from the C
 
 ## Settings
 
-Place `settings.ini` beside the executable. Values use `Identifier=value`; text after `;` and malformed lines are ignored. The recognized keys are:
+Place `settings.ini` beside the executable. You can rename the included `settings.sample.ini` to `settings.ini`, or let the program create a default `settings.ini` automatically on its first run. Values use `Identifier=value`; lines beginning with `;` are comments, and malformed lines are ignored. The recognized keys are:
 
 ```ini
+; Folder containing wallpaper images. Relative paths are based on the executable folder.
+; An empty or unavailable folder falls back to the current working folder.
 source_directory=C:\Users\Example\Pictures\Wallpapers
+
+; Last selected image. The program updates this automatically.
 last_image=wallpaper2.jpg
+
+; Change wallpapers once when the program starts: true or false.
 change_on_start=true
 ```
 

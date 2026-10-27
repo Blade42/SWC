@@ -670,9 +670,17 @@ void WriteSettingsFile(
     const std::filesystem::path& path,
     const swc::Settings& settings) {
     const std::wstring contents =
+        L"; Folder to read wallpaper images from. Relative paths use the executable folder.\r\n"
+        L"; If empty or unavailable, the current working folder is used.\r\n"
         L"source_directory=" + settings.sourceDirectory + L"\r\n" +
+        L"; Last image used; maintained automatically by the program.\r\n"
         L"last_image=" + settings.lastImage + L"\r\n" +
-        L"change_on_start=" + (settings.changeOnStart ? L"true" : L"false") + L"\r\n";
+        L"; Change wallpapers once when the program starts: true or false.\r\n"
+        L"change_on_start=" + (settings.changeOnStart ? L"true" : L"false") + L"\r\n"
+        L"; Example configuration:\r\n"
+        L"; source_directory=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
+        L"; last_image=wallpaper2.jpg\r\n"
+        L"; change_on_start=false\r\n";
     const std::filesystem::path temporary = path.wstring() + L".tmp";
     struct TemporarySettingsFile {
         const std::filesystem::path& path;
@@ -699,6 +707,18 @@ void WriteSettingsFile(
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         const DWORD error = GetLastError();
         FailWin32(L"Could not update settings.ini", error);
+    }
+}
+
+void InitializeSettingsFile(const std::filesystem::path& path) {
+    std::lock_guard<std::mutex> lock(gSettingsMutex);
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) {
+        Fail(L"Could not inspect settings.ini: " + FilesystemErrorText(error));
+    }
+    if (!exists) {
+        WriteSettingsFile(path, swc::Settings{});
     }
 }
 
@@ -1409,6 +1429,7 @@ int RunResident(HINSTANCE instance) {
     } comUninitializer;
 
     const auto settingsPath = ExecutableDirectory() / L"settings.ini";
+    InitializeSettingsFile(settingsPath);
     const auto settings = ReadSettings(settingsPath);
     ResidentState state;
     state.instance = instance;
