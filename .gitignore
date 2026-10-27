@@ -3,3 +3,8 @@ build/wallpaper-background-2.png
 ~$quirements MVP.docx
 ~WRL0003.tmp
 build/wallpaper-background-2.png
+
+# Generated build outputs; keep the distributable sample settings file.
+/build/*
+!/build/settings.sample.ini
+/build-cmake/
