@@ -12,6 +12,7 @@ int main() {
             L"; whole-line comment\n"
             L"source_directories = C:\\Wallpapers ; inline comment\n"
             L"last_image=two.jpg\n"
+            L"display_image=\\\\?\\DISPLAY#1|C:\\Wallpapers\\one.jpg\n"
             L"not an assignment\n"
             L"ignored=value\n"
             L"last_image=three=final.png\n");
@@ -20,6 +21,9 @@ int main() {
         assert(settings.sourceDirectories[0].path == L"C:\\Wallpapers");
         assert(settings.sourceDirectories[0].enabled);
         assert(settings.lastImage == L"three=final.png");
+        assert(settings.displayImages.size() == 1);
+        assert(settings.displayImages[0].devicePath == L"\\\\?\\DISPLAY#1");
+        assert(settings.displayImages[0].imagePath == L"C:\\Wallpapers\\one.jpg");
         assert(settings.changeOnStart);
     }
 
@@ -79,6 +83,37 @@ int main() {
     assert(swc::IsSupportedExtension(L".Png"));
     assert(swc::IsSupportedExtension(L".webp"));
     assert(!swc::IsSupportedExtension(L".bmp"));
+    assert(swc::FormatFileSize(0) == L"0B");
+    assert(swc::FormatFileSize(850) == L"850B");
+    assert(swc::FormatFileSize(121 * 1024) == L"121k");
+    assert(swc::FormatFileSize(1023 * 1024) == L"1023k");
+    assert(swc::FormatFileSize(1024 * 1024) == L"1.0M");
+    assert(swc::FormatFileSize(2406 * 1024) == L"2.3M");
+
+    {
+        std::vector<std::uint8_t> edid(128, 0);
+        const std::size_t descriptor = 54;
+        const std::uint16_t samsungManufacturer =
+            static_cast<std::uint16_t>((19 << 10) | (1 << 5) | 13);
+        edid[8] = static_cast<std::uint8_t>(samsungManufacturer >> 8);
+        edid[9] = static_cast<std::uint8_t>(samsungManufacturer & 0xFF);
+        edid[descriptor + 3] = 0xFC;
+        const std::string model = "LU28R55";
+        std::copy(model.begin(), model.end(), edid.begin() + descriptor + 5);
+        edid[descriptor + 5 + model.size()] = '\n';
+        assert(swc::ExtractEdidMonitorName(edid) == L"Samsung LU28R55");
+        assert(swc::FormatDisplayName(
+            swc::ExtractEdidMonitorName(edid), 0) == L"Samsung LU28R55 (#1)");
+
+        std::fill(edid.begin() + descriptor + 5, edid.begin() + descriptor + 18, 0);
+        const std::string generic = "PnP Monitor";
+        std::copy(generic.begin(), generic.end(), edid.begin() + descriptor + 5);
+        assert(swc::ExtractEdidMonitorName(edid).empty());
+        assert(swc::IsGenericMonitorName(L"Generic PnP Monitor"));
+        assert(!swc::IsGenericMonitorName(L"Samsung LU28R55"));
+        assert(swc::FormatDisplayName({}, 1) == L"Display #2");
+        assert(swc::ExtractEdidMonitorName(std::vector<std::uint8_t>(32)).empty());
+    }
 
     const auto landscape = swc::CalculateFitRect(800, 600, 1920, 1080);
     assert(landscape.left == 240);
@@ -133,6 +168,20 @@ int main() {
     assert((swc::CandidateAttemptOrder(names, L"3.jpg") == std::vector<std::size_t>{0, 1, 2}));
     assert((swc::CandidateAttemptOrder(names, L"missing.jpg") == std::vector<std::size_t>{0, 1, 2}));
     assert(swc::CandidateAttemptOrder({}, L"").empty());
+    assert((swc::CandidateAttemptOrderFrom(names, L"2.jpg") ==
+        std::vector<std::size_t>{1, 2, 0}));
+    assert((swc::CandidateAttemptOrderFrom(names, L"missing.jpg") ==
+        std::vector<std::size_t>{0, 1, 2}));
+    assert(swc::CandidateAttemptOrderFrom({}, L"").empty());
+    {
+        std::vector<std::wstring> sequence;
+        const auto order = swc::CandidateAttemptOrderFrom(names, L"3.jpg");
+        for (std::size_t display = 0; display < 3; ++display) {
+            sequence.push_back(names[order[display]]);
+        }
+        assert((sequence == std::vector<std::wstring>{
+            L"3.jpg", L"1.jpg", L"2.jpg"}));
+    }
     assert((swc::PreviousCandidateAttemptOrder(names, L"2.jpg") ==
         std::vector<std::size_t>{0, 2, 1}));
     assert((swc::PreviousCandidateAttemptOrder(names, L"1.jpg") ==

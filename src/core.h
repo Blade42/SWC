@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cwctype>
+#include <iomanip>
 #include <istream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,8 +26,14 @@ inline bool operator!=(const SourceDirectory& left, const SourceDirectory& right
     return !(left == right);
 }
 
+struct DisplayImage {
+    std::wstring devicePath;
+    std::wstring imagePath;
+};
+
 struct Settings {
     std::vector<SourceDirectory> sourceDirectories;
+    std::vector<DisplayImage> displayImages;
     std::wstring lastImage;
     bool changeOnStart = true;
 };
@@ -198,6 +206,15 @@ inline Settings ParseSettings(std::wistream& input) {
             }
         } else if (identifier == L"last_image") {
             settings.lastImage = value;
+        } else if (identifier == L"display_image") {
+            const auto separator = value.find(L'|');
+            if (separator != std::wstring::npos &&
+                separator != 0 &&
+                separator + 1 < value.size()) {
+                settings.displayImages.push_back({
+                    value.substr(0, separator),
+                    value.substr(separator + 1)});
+            }
         } else if (identifier == L"change_on_start") {
             std::wstring normalized = value;
             std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
@@ -218,6 +235,130 @@ inline bool IsSupportedExtension(std::wstring extension) {
         extension == L".png" || extension == L".webp";
 }
 
+inline std::wstring FormatFileSize(std::uintmax_t bytes) {
+    constexpr std::uintmax_t kibibyte = 1024;
+    constexpr std::uintmax_t mebibyte = kibibyte * 1024;
+    if (bytes < kibibyte) {
+        return std::to_wstring(bytes) + L"B";
+    }
+    if (bytes < mebibyte) {
+        const auto roundedKilobytes = (bytes + kibibyte / 2) / kibibyte;
+        if (roundedKilobytes < 1024) {
+            return std::to_wstring(roundedKilobytes) + L"k";
+        }
+    }
+
+    std::wostringstream formatted;
+    formatted << std::fixed << std::setprecision(1)
+        << static_cast<long double>(bytes) / mebibyte << L"M";
+    return formatted.str();
+}
+
+inline bool IsGenericMonitorName(const std::wstring& value) {
+    std::wstring normalized = Trim(value);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(ch));
+    });
+    return normalized.empty() ||
+        normalized == L"generic pnp monitor" ||
+        normalized == L"generic non-pnp monitor" ||
+        normalized == L"pnp monitor" ||
+        normalized == L"non-pnp monitor";
+}
+
+inline std::wstring EdidManufacturerName(const std::vector<std::uint8_t>& edid) {
+    if (edid.size() < 10) {
+        return {};
+    }
+
+    const std::uint16_t encoded =
+        (static_cast<std::uint16_t>(edid[8]) << 8) | edid[9];
+    std::wstring code(3, L'\0');
+    for (std::size_t index = 0; index < code.size(); ++index) {
+        const unsigned int shift = static_cast<unsigned int>((2 - index) * 5);
+        const auto letter = static_cast<wchar_t>((encoded >> shift) & 0x1F);
+        if (letter < 1 || letter > 26) {
+            return {};
+        }
+        code[index] = static_cast<wchar_t>(L'A' + letter - 1);
+    }
+
+    if (code == L"SAM") return L"Samsung";
+    if (code == L"DEL") return L"Dell";
+    if (code == L"GSM" || code == L"LGD") return L"LG";
+    if (code == L"ACI") return L"ASUS";
+    if (code == L"HWP") return L"HP";
+    if (code == L"BNQ") return L"BenQ";
+    if (code == L"AOC") return L"AOC";
+    if (code == L"PHI") return L"Philips";
+    if (code == L"SNY") return L"Sony";
+    if (code == L"LEN") return L"Lenovo";
+    if (code == L"MSI") return L"MSI";
+    if (code == L"VSC") return L"ViewSonic";
+    return {};
+}
+
+inline std::wstring ExtractEdidMonitorName(const std::vector<std::uint8_t>& edid) {
+    if (edid.size() < 128) {
+        return {};
+    }
+
+    for (std::size_t offset = 54; offset + 18 <= 126; offset += 18) {
+        if (edid[offset] != 0 ||
+            edid[offset + 1] != 0 ||
+            edid[offset + 2] != 0 ||
+            edid[offset + 3] != 0xFC ||
+            edid[offset + 4] != 0) {
+            continue;
+        }
+
+        std::wstring name;
+        for (std::size_t index = 5; index < 18; ++index) {
+            const auto character = edid[offset + index];
+            if (character == 0 || character == '\r' || character == '\n') {
+                break;
+            }
+            if (character < 0x20 || character > 0x7E) {
+                return {};
+            }
+            name.push_back(static_cast<wchar_t>(character));
+        }
+        name = Trim(std::move(name));
+        if (IsGenericMonitorName(name)) {
+            return {};
+        }
+
+        const std::wstring manufacturer = EdidManufacturerName(edid);
+        if (!manufacturer.empty()) {
+            std::wstring prefix = name.substr(0, manufacturer.size());
+            std::transform(prefix.begin(), prefix.end(), prefix.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            std::wstring normalizedManufacturer = manufacturer;
+            std::transform(
+                normalizedManufacturer.begin(),
+                normalizedManufacturer.end(),
+                normalizedManufacturer.begin(),
+                [](wchar_t ch) { return static_cast<wchar_t>(std::towlower(ch)); });
+            if (prefix != normalizedManufacturer) {
+                return manufacturer + L" " + name;
+            }
+        }
+        return name;
+    }
+    return {};
+}
+
+inline std::wstring FormatDisplayName(
+    const std::wstring& modelName,
+    std::size_t primaryFirstIndex) {
+    const std::wstring model = Trim(modelName);
+    if (model.empty()) {
+        return L"Display #" + std::to_wstring(primaryFirstIndex + 1);
+    }
+    return model + L" (#" + std::to_wstring(primaryFirstIndex + 1) + L")";
+}
+
 inline std::vector<std::size_t> CandidateAttemptOrder(
     const std::vector<std::wstring>& sortedNames,
     const std::wstring& lastImage) {
@@ -231,6 +372,29 @@ inline std::vector<std::size_t> CandidateAttemptOrder(
         const auto previous = std::find(sortedNames.begin(), sortedNames.end(), lastImage);
         if (previous != sortedNames.end()) {
             start = (static_cast<std::size_t>(previous - sortedNames.begin()) + 1) % sortedNames.size();
+        }
+    }
+
+    order.reserve(sortedNames.size());
+    for (std::size_t offset = 0; offset < sortedNames.size(); ++offset) {
+        order.push_back((start + offset) % sortedNames.size());
+    }
+    return order;
+}
+
+inline std::vector<std::size_t> CandidateAttemptOrderFrom(
+    const std::vector<std::wstring>& sortedNames,
+    const std::wstring& firstImage) {
+    std::vector<std::size_t> order;
+    if (sortedNames.empty()) {
+        return order;
+    }
+
+    std::size_t start = 0;
+    if (!firstImage.empty()) {
+        const auto first = std::find(sortedNames.begin(), sortedNames.end(), firstImage);
+        if (first != sortedNames.end()) {
+            start = static_cast<std::size_t>(first - sortedNames.begin());
         }
     }
 
