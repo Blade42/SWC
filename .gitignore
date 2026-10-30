@@ -13,4 +13,4 @@ settings.ini
 !/build/settings.sample.ini
 /build-cmake/
 ~$quirements MVP.docx
-~WRL0003.tmp
+*.tmp
