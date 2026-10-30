@@ -67,6 +67,11 @@ enum class LargeImageMode {
     fit
 };
 
+enum class MultiMonitorImageMode {
+    sameImage,
+    separateImages
+};
+
 struct Settings {
     std::vector<SourceDirectory> sourceDirectories;
     std::vector<DisplayImage> displayImages;
@@ -83,6 +88,8 @@ struct Settings {
     SmallImageMode smallImageMode = SmallImageMode::fit;
     std::uint32_t maxSmallImageEnlargePercent = 400;
     LargeImageMode largeImageMode = LargeImageMode::fit;
+    MultiMonitorImageMode multiMonitorImageMode =
+        MultiMonitorImageMode::separateImages;
 };
 
 inline bool HasEnabledSourceDirectory(
@@ -482,6 +489,16 @@ inline Settings ParseSettings(std::wistream& input) {
                 settings.largeImageMode = LargeImageMode::fill;
             } else if (normalized == L"fit") {
                 settings.largeImageMode = LargeImageMode::fit;
+            }
+        } else if (identifier == L"multi_monitor_image_mode") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            if (normalized == L"same_image") {
+                settings.multiMonitorImageMode = MultiMonitorImageMode::sameImage;
+            } else if (normalized == L"separate_images") {
+                settings.multiMonitorImageMode = MultiMonitorImageMode::separateImages;
             }
         }
     }

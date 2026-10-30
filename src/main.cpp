@@ -84,6 +84,10 @@ constexpr int kImageLargeCenteredRadioId = 2030;
 constexpr int kImageLargeFillRadioId = 2031;
 constexpr int kImageLargeFitRadioId = 2032;
 constexpr int kImageResizeToPercentUnitLabelId = 2033;
+constexpr int kSameImageOnDisplaysRadioId = 2035;
+constexpr int kSeparateImagesOnDisplaysRadioId = 2036;
+constexpr int kMultiMonitorSettingsGroupId = 2037;
+constexpr int kImagePlacementGroupId = 2038;
 constexpr UINT kSetDisplayCommandBase = 40000;
 constexpr int kPlaylistThumbnailSize = 64;
 constexpr std::size_t kPlaylistThumbnailCacheLimit = 512;
@@ -1620,6 +1624,12 @@ void WriteSettingsFile(
                 : settings.largeImageMode == swc::LargeImageMode::fill
                 ? L"fill"
                 : L"fit") + L"\r\n"
+        L"; Multi-monitor source selection: same_image or separate_images.\r\n"
+        L"multi_monitor_image_mode=" +
+        std::wstring(
+            settings.multiMonitorImageMode == swc::MultiMonitorImageMode::sameImage
+                ? L"same_image"
+                : L"separate_images") + L"\r\n"
         L"; Example configuration:\r\n"
         L"; source_directories=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
         L"; source_directories=-D:\\SeasonalWallpapers\r\n"
@@ -1684,6 +1694,7 @@ void UpdateUserSettings(
     settings.smallImageMode = preferences.smallImageMode;
     settings.maxSmallImageEnlargePercent = preferences.maxSmallImageEnlargePercent;
     settings.largeImageMode = preferences.largeImageMode;
+    settings.multiMonitorImageMode = preferences.multiMonitorImageMode;
     WriteSettingsFile(path, settings);
 }
 
@@ -1735,17 +1746,21 @@ struct WallpaperRequest {
     std::wstring firstImage;
     std::wstring displayDevicePath;
     bool reapplyCurrent = false;
+    bool reapplyMultiMonitorMode = false;
 };
 
 void Run(const WallpaperRequest& request) {
     const auto executableDirectory = ExecutableDirectory();
     const auto settingsPath = executableDirectory / L"settings.ini";
     const auto settings = ReadSettings(settingsPath);
-    const auto images = request.reapplyCurrent
+    const auto images = request.reapplyCurrent && !request.reapplyMultiMonitorMode
         ? std::vector<SourceImage>{}
         : FindSourceImages(settings.sourceDirectories, executableDirectory);
     if (images.empty() && !request.reapplyCurrent) {
         return;
+    }
+    if (images.empty() && request.reapplyMultiMonitorMode) {
+        Fail(L"Could not reapply the multi-monitor setting because no source images are available.");
     }
 
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -1814,7 +1829,7 @@ void Run(const WallpaperRequest& request) {
         }
     } temporaryFiles{temporaryPaths};
 
-    if (request.reapplyCurrent) {
+    if (request.reapplyCurrent && !request.reapplyMultiMonitorMode) {
         const std::wstring refreshId = std::to_wstring(GetTickCount64());
         for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
             const auto current = std::find_if(
@@ -1865,6 +1880,192 @@ void Run(const WallpaperRequest& request) {
         return;
     }
 
+    if (request.reapplyCurrent && request.reapplyMultiMonitorMode) {
+        const auto findImageIndex = [&](const std::wstring& imagePath) {
+            for (std::size_t index = 0; index < images.size(); ++index) {
+                const std::wstring path = images[index].path.wstring();
+                if (CompareStringOrdinal(
+                        path.data(),
+                        static_cast<int>(path.size()),
+                        imagePath.data(),
+                        static_cast<int>(imagePath.size()),
+                        TRUE) == CSTR_EQUAL) {
+                    return index;
+                }
+            }
+            return images.size();
+        };
+        const auto currentDisplayImage = [&](std::size_t displayIndex) {
+            const auto current = std::find_if(
+                settings.displayImages.begin(),
+                settings.displayImages.end(),
+                [&](const swc::DisplayImage& item) {
+                    return CompareStringOrdinal(
+                        item.devicePath.data(),
+                        static_cast<int>(item.devicePath.size()),
+                        displays[displayIndex].devicePath.data(),
+                        static_cast<int>(displays[displayIndex].devicePath.size()),
+                        TRUE) == CSTR_EQUAL;
+                });
+            return current == settings.displayImages.end()
+                ? images.size()
+                : findImageIndex(current->imagePath);
+        };
+
+        const std::wstring refreshId = std::to_wstring(GetTickCount64());
+        for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+            const auto& basePath = outputPaths[displayIndex];
+            outputPaths[displayIndex] = basePath.parent_path() /
+                (basePath.stem().wstring() + L"-reapply-" + refreshId +
+                    basePath.extension().wstring());
+            temporaryPaths[displayIndex] = outputPaths[displayIndex].wstring() + L".tmp";
+        }
+
+        std::vector<std::size_t> selectedImages(displays.size(), images.size());
+        if (settings.multiMonitorImageMode == swc::MultiMonitorImageMode::sameImage) {
+            std::size_t currentImage = displays.empty()
+                ? images.size()
+                : currentDisplayImage(0);
+            if (currentImage == images.size()) {
+                const auto cursor = std::find(names.begin(), names.end(), savedCursor);
+                currentImage = cursor == names.end()
+                    ? 0
+                    : static_cast<std::size_t>(cursor - names.begin());
+            }
+
+            std::wstring lastFailure;
+            bool rendered = false;
+            for (const std::size_t candidate :
+                 swc::CandidateAttemptOrderFrom(names, names[currentImage])) {
+                try {
+                    for (std::size_t displayIndex = 0;
+                         displayIndex < displays.size();
+                         ++displayIndex) {
+                        CreateBackgroundPng(
+                            factory.Get(),
+                            images[candidate].path,
+                            displays[displayIndex].width,
+                            displays[displayIndex].height,
+                            temporaryPaths[displayIndex],
+                            settings);
+                    }
+                    std::fill(
+                        selectedImages.begin(), selectedImages.end(), candidate);
+                    rendered = true;
+                    break;
+                } catch (const Failure& failure) {
+                    lastFailure = failure.message;
+                    for (const auto& path : temporaryPaths) {
+                        DeleteFileW(path.c_str());
+                    }
+                }
+            }
+            if (!rendered && !displays.empty()) {
+                Fail(lastFailure.empty()
+                    ? L"No usable image could be processed for all displays."
+                    : L"No usable image could be processed for all displays.\r\n\r\n" +
+                        lastFailure);
+            }
+        } else {
+            bool hasCompleteAssignments = !displays.empty();
+            bool hasDifferentImages = false;
+            for (std::size_t displayIndex = 0;
+                 displayIndex < displays.size();
+                 ++displayIndex) {
+                selectedImages[displayIndex] = currentDisplayImage(displayIndex);
+                if (selectedImages[displayIndex] == images.size()) {
+                    hasCompleteAssignments = false;
+                    break;
+                }
+                if (displayIndex != 0 &&
+                    selectedImages[displayIndex] != selectedImages[0]) {
+                    hasDifferentImages = true;
+                }
+            }
+
+            if (!hasCompleteAssignments || !hasDifferentImages) {
+                std::size_t cursorIndex = 0;
+                const auto cursor = std::find(names.begin(), names.end(), savedCursor);
+                if (cursor != names.end()) {
+                    cursorIndex = static_cast<std::size_t>(cursor - names.begin());
+                }
+                for (std::size_t offset = displays.size(); offset > 0; --offset) {
+                    selectedImages[offset - 1] = cursorIndex;
+                    if (offset > 1) {
+                        const auto previous =
+                            swc::PreviousCandidateAttemptOrder(names, names[cursorIndex]);
+                        cursorIndex = previous.front();
+                    }
+                }
+            }
+
+            for (std::size_t displayIndex = 0;
+                 displayIndex < displays.size();
+                 ++displayIndex) {
+                const std::size_t desiredImage = selectedImages[displayIndex];
+                std::wstring lastFailure;
+                bool rendered = false;
+                for (const std::size_t candidate : swc::CandidateAttemptOrderFrom(
+                         names, names[desiredImage])) {
+                    try {
+                        CreateBackgroundPng(
+                            factory.Get(),
+                            images[candidate].path,
+                            displays[displayIndex].width,
+                            displays[displayIndex].height,
+                            temporaryPaths[displayIndex],
+                            settings);
+                        selectedImages[displayIndex] = candidate;
+                        rendered = true;
+                        break;
+                    } catch (const Failure& failure) {
+                        lastFailure = failure.message;
+                        DeleteFileW(temporaryPaths[displayIndex].c_str());
+                    }
+                }
+                if (!rendered) {
+                    Fail(lastFailure.empty()
+                        ? L"No usable image could be processed for display " +
+                            std::to_wstring(displayIndex + 1) + L"."
+                        : L"No usable image could be processed for display " +
+                            std::to_wstring(displayIndex + 1) + L".\r\n\r\n" +
+                            lastFailure);
+                }
+            }
+        }
+
+        for (std::size_t displayIndex = 0;
+             displayIndex < displays.size();
+             ++displayIndex) {
+            if (!MoveFileExW(
+                    temporaryPaths[displayIndex].c_str(),
+                    outputPaths[displayIndex].c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                FailWin32(L"Could not publish a generated wallpaper");
+            }
+            generated.push_back({
+                displays[displayIndex],
+                temporaryPaths[displayIndex],
+                outputPaths[displayIndex]});
+        }
+        for (const auto& item : generated) {
+            ApplyWallpaper(wallpaper.Get(), item.display, item.outputPath);
+        }
+        std::vector<swc::DisplayImage> displayImages;
+        displayImages.reserve(displays.size());
+        for (std::size_t displayIndex = 0;
+             displayIndex < displays.size();
+             ++displayIndex) {
+            displayImages.push_back({
+                displays[displayIndex].devicePath,
+                images[selectedImages[displayIndex]].path.wstring()});
+        }
+        UpdateWallpaperSettings(
+            settingsPath, settings.lastImage, displayImages, true);
+        RemoveUnusedGeneratedWallpapers(executableDirectory, wallpaper.Get(), displays);
+        return;
+    }
+
     std::wstring lastImage = savedCursor;
     const auto selectCandidate = [&](
         std::size_t displayIndex,
@@ -1910,7 +2111,8 @@ void Run(const WallpaperRequest& request) {
 
     const bool hasSavedCursor =
         std::find(names.begin(), names.end(), lastImage) != names.end();
-    if (request.displayDevicePath.empty() && request.previous && hasSavedCursor) {
+    if (request.displayDevicePath.empty() && request.previous && hasSavedCursor &&
+        settings.multiMonitorImageMode == swc::MultiMonitorImageMode::separateImages) {
         for (std::size_t skippedDisplay = 1; skippedDisplay < displays.size(); ++skippedDisplay) {
             const auto currentSequenceImage = selectCandidate(0, lastImage, false);
             lastImage = names[currentSequenceImage];
@@ -1967,25 +2169,56 @@ void Run(const WallpaperRequest& request) {
             Fail(L"The selected playlist image is no longer available.");
         }
 
-        for (std::size_t offset = 0; offset < displays.size(); ++offset) {
-            const std::size_t displayIndex = request.previous
-                ? displays.size() - 1 - offset
-                : offset;
-            const std::size_t selectedIndex = selectCandidate(
-                displayIndex,
-                startAtImage && offset == 0 ? request.firstImage : lastImage,
-                startAtImage && offset == 0);
-            lastImage = names[selectedIndex];
-            if (displayIndex == displays.size() - 1) {
+        if (settings.multiMonitorImageMode == swc::MultiMonitorImageMode::sameImage) {
+            if (!displays.empty()) {
+                const std::size_t selectedIndex = selectCandidate(
+                    0,
+                    startAtImage ? request.firstImage : lastImage,
+                    startAtImage);
+                lastImage = names[selectedIndex];
                 lastDisplayImage = lastImage;
+                for (std::size_t displayIndex = 0;
+                     displayIndex < displays.size();
+                     ++displayIndex) {
+                    if (displayIndex != 0) {
+                        CreateBackgroundPng(
+                            factory.Get(),
+                            images[selectedIndex].path,
+                            displays[displayIndex].width,
+                            displays[displayIndex].height,
+                            temporaryPaths[displayIndex],
+                            settings);
+                    }
+                    displayImages.push_back({
+                        displays[displayIndex].devicePath,
+                        images[selectedIndex].path.wstring()});
+                    generated.push_back({
+                        displays[displayIndex],
+                        temporaryPaths[displayIndex],
+                        outputPaths[displayIndex]});
+                }
             }
-            displayImages.push_back({
-                displays[displayIndex].devicePath,
-                images[selectedIndex].path.wstring()});
-            generated.push_back({
-                displays[displayIndex],
-                temporaryPaths[displayIndex],
-                outputPaths[displayIndex]});
+        } else {
+            for (std::size_t offset = 0; offset < displays.size(); ++offset) {
+                const std::size_t displayIndex = request.previous
+                    ? displays.size() - 1 - offset
+                    : offset;
+                const std::size_t selectedIndex = selectCandidate(
+                    displayIndex,
+                    startAtImage && offset == 0 ? request.firstImage : lastImage,
+                    startAtImage && offset == 0);
+                lastImage = names[selectedIndex];
+                if (displayIndex == displays.size() - 1) {
+                    lastDisplayImage = lastImage;
+                }
+                displayImages.push_back({
+                    displays[displayIndex].devicePath,
+                    images[selectedIndex].path.wstring()});
+                generated.push_back({
+                    displays[displayIndex],
+                    temporaryPaths[displayIndex],
+                    outputPaths[displayIndex]});
+            }
         }
     }
 
@@ -2061,6 +2294,8 @@ struct ResidentState {
     HWND backgroundAdaptiveModeRadio = nullptr;
     HWND backgroundFillColorLabel = nullptr;
     HWND backgroundFillColorButton = nullptr;
+    HWND multiMonitorSettingsGroup = nullptr;
+    HWND imagePlacementGroup = nullptr;
     HWND imageResizeToRadio = nullptr;
     HWND imageAutoFitRadio = nullptr;
     HWND imageResizeToPercentEdit = nullptr;
@@ -2077,6 +2312,8 @@ struct ResidentState {
     HWND imageLargeCenteredRadio = nullptr;
     HWND imageLargeFillRadio = nullptr;
     HWND imageLargeFitRadio = nullptr;
+    HWND sameImageOnDisplaysRadio = nullptr;
+    HWND separateImagesOnDisplaysRadio = nullptr;
     RECT settingsWindowNormalRect{};
     bool hasSettingsWindowNormalRect = false;
     HWND sourceDirectoryList = nullptr;
@@ -2114,6 +2351,7 @@ struct ResidentState {
     bool iconAdded = false;
     bool changeRunning = false;
     bool backgroundReapplyPending = false;
+    bool multiMonitorModeReapplyPending = false;
     bool shuttingDown = false;
     std::atomic_bool changeFinished = false;
     std::thread changeThread;
@@ -3284,31 +3522,35 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
     moveControl(state.backgroundFillColorLabel, 58, 260, 122, 28);
     moveControl(state.backgroundFillColorButton, 180, 253, 180, 42);
     moveControl(state.backgroundAdaptiveModeRadio, 30, 306, 600, 28);
-    moveControl(state.imageResizeToRadio, 30, 190, clientWidth - 60, 28);
-    moveControl(state.imageResizeToPercentLabel, 58, 226, 168, 26);
-    moveControl(state.imageResizeToPercentEdit, 230, 221, 64, 27);
-    moveControl(state.imageResizeToPercentUnitLabel, 300, 226, 24, 26);
-    moveControl(state.imageAutoFitRadio, 30, 263, clientWidth - 60, 28);
+    moveControl(state.multiMonitorSettingsGroup, 20, 180, clientWidth - 40, 82);
+    moveControl(state.sameImageOnDisplaysRadio, 40, 204, 340, 28);
+    moveControl(state.separateImagesOnDisplaysRadio, 390, 204, clientWidth - 420, 28);
+    moveControl(state.imagePlacementGroup, 20, 268, clientWidth - 40, 306);
+    moveControl(state.imageResizeToRadio, 40, 288, clientWidth - 80, 28);
+    moveControl(state.imageResizeToPercentLabel, 68, 321, 168, 26);
+    moveControl(state.imageResizeToPercentEdit, 240, 316, 64, 27);
+    moveControl(state.imageResizeToPercentUnitLabel, 310, 321, 24, 26);
+    moveControl(state.imageAutoFitRadio, 40, 349, clientWidth - 80, 28);
     const int imageGroupWidth = std::max(300, (clientWidth - 80) / 2);
     const int imageLargeGroupX = clientWidth - 30 - imageGroupWidth;
-    moveControl(state.imageSmallGroup, 30, 300, imageGroupWidth, 220);
-    moveControl(state.imageSmallCenteredRadio, 50, 326, imageGroupWidth - 40, 28);
-    moveControl(state.imageSmallTileRadio, 50, 360, imageGroupWidth - 40, 28);
-    moveControl(state.imageSmallFitRadio, 50, 394, imageGroupWidth - 40, 28);
-    moveControl(state.imageMaxEnlargeLabel, 72, 432, 170, 26);
-    moveControl(state.imageMaxEnlargePercentEdit, 247, 427, 64, 27);
-    moveControl(state.imageMaxEnlargePercentLabel, 315, 432, 32, 26);
+    moveControl(state.imageSmallGroup, 30, 380, imageGroupWidth, 176);
+    moveControl(state.imageSmallCenteredRadio, 50, 403, imageGroupWidth - 40, 28);
+    moveControl(state.imageSmallTileRadio, 50, 433, imageGroupWidth - 40, 28);
+    moveControl(state.imageSmallFitRadio, 50, 463, imageGroupWidth - 40, 28);
+    moveControl(state.imageMaxEnlargeLabel, 72, 497, 170, 26);
+    moveControl(state.imageMaxEnlargePercentEdit, 247, 492, 64, 27);
+    moveControl(state.imageMaxEnlargePercentLabel, 315, 497, 32, 26);
     moveControl(
-        state.imageLargeGroup, imageLargeGroupX, 300, imageGroupWidth, 220);
+        state.imageLargeGroup, imageLargeGroupX, 380, imageGroupWidth, 176);
     moveControl(
         state.imageLargeCenteredRadio,
-        imageLargeGroupX + 20, 326, imageGroupWidth - 40, 28);
+        imageLargeGroupX + 20, 403, imageGroupWidth - 40, 28);
     moveControl(
         state.imageLargeFillRadio,
-        imageLargeGroupX + 20, 360, imageGroupWidth - 40, 28);
+        imageLargeGroupX + 20, 433, imageGroupWidth - 40, 28);
     moveControl(
         state.imageLargeFitRadio,
-        imageLargeGroupX + 20, 394, imageGroupWidth - 40, 28);
+        imageLargeGroupX + 20, 463, imageGroupWidth - 40, 28);
     moveControl(
         GetDlgItem(state.settingsWindow, kExitSettingsButtonId),
         clientWidth - 28 - 82 - 10 - 82,
@@ -3462,6 +3704,20 @@ void SyncImageSizingControls(ResidentState& state) {
         state.settings.largeImageMode == swc::LargeImageMode::fit
             ? BST_CHECKED : BST_UNCHECKED,
         0);
+    SendMessageW(
+        state.sameImageOnDisplaysRadio,
+        BM_SETCHECK,
+        state.settings.multiMonitorImageMode ==
+                swc::MultiMonitorImageMode::sameImage
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.separateImagesOnDisplaysRadio,
+        BM_SETCHECK,
+        state.settings.multiMonitorImageMode ==
+                swc::MultiMonitorImageMode::separateImages
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
 
     EnableWindow(state.imageResizeToPercentEdit, resizeTo);
     EnableWindow(state.imageResizeToPercentLabel, resizeTo);
@@ -3517,6 +3773,10 @@ void ShowSettingsPage(ResidentState& state) {
         EnableWindow(state.backgroundFillColorButton, fillColorMode);
     }
     const bool imagePage = page == 4;
+    ShowWindow(state.multiMonitorSettingsGroup, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imagePlacementGroup, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.sameImageOnDisplaysRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.separateImagesOnDisplaysRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageResizeToRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageAutoFitRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageResizeToPercentEdit, imagePage ? SW_SHOW : SW_HIDE);
@@ -3758,12 +4018,18 @@ std::wstring SelectSourceDirectory(HWND owner, const std::wstring& currentDirect
 
 void StartWallpaperChange(ResidentState& state, WallpaperRequest request = {});
 
-void RequestBackgroundReapply(ResidentState& state) {
+void RequestBackgroundReapply(
+    ResidentState& state,
+    bool reapplyMultiMonitorMode = false) {
     if (state.changeRunning) {
         state.backgroundReapplyPending = true;
+        state.multiMonitorModeReapplyPending =
+            state.multiMonitorModeReapplyPending || reapplyMultiMonitorMode;
         return;
     }
-    StartWallpaperChange(state, WallpaperRequest{false, {}, {}, true});
+    StartWallpaperChange(
+        state,
+        WallpaperRequest{false, {}, {}, true, reapplyMultiMonitorMode});
 }
 
 void SaveBackgroundSettings(
@@ -3831,10 +4097,12 @@ void SaveImageSettings(
     swc::Settings updated,
     HWND owner) {
     try {
+        const bool multiMonitorModeChanged =
+            updated.multiMonitorImageMode != state.settings.multiMonitorImageMode;
         UpdateUserSettings(state.settingsPath, updated);
         state.settings = std::move(updated);
         SyncImageSizingControls(state);
-        RequestBackgroundReapply(state);
+        RequestBackgroundReapply(state, multiMonitorModeChanged);
     } catch (const Failure& failure) {
         SyncImageSizingControls(state);
         ShowError(failure.message, owner);
@@ -4117,20 +4385,40 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             EnableWindow(state->backgroundFillColorLabel, fillColorMode);
             EnableWindow(state->backgroundFillColorButton, fillColorMode);
 
+            state->multiMonitorSettingsGroup = CreateSettingsControl(
+                0, L"BUTTON", L"Multi-monitor settings",
+                WS_CHILD | BS_GROUPBOX,
+                20, 180, kSettingsContentWidth - 40, 82, window,
+                kMultiMonitorSettingsGroupId, state->instance, state->settingsFont);
+            state->imagePlacementGroup = CreateSettingsControl(
+                0, L"BUTTON", L"Image placement",
+                WS_CHILD | BS_GROUPBOX,
+                20, 268, kSettingsContentWidth - 40, 306, window,
+                kImagePlacementGroupId, state->instance, state->settingsFont);
+            state->sameImageOnDisplaysRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Use the same image on all displays",
+                WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                40, 204, 340, 28, window, kSameImageOnDisplaysRadioId,
+                state->instance, state->settingsFont);
+            state->separateImagesOnDisplaysRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Use separate images on all displays",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                390, 204, 548, 28, window, kSeparateImagesOnDisplaysRadioId,
+                state->instance, state->settingsFont);
             state->imageResizeToRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Resize to...",
                 WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-                30, 190, 450, 28, window, kImageResizeToRadioId,
+                40, 288, 450, 28, window, kImageResizeToRadioId,
                 state->instance, state->settingsFont);
             state->imageResizeToPercentLabel = CreateSettingsControl(
                 0, L"STATIC", L"Target on closer dimension:",
                 WS_CHILD | SS_LEFT,
-                58, 226, 168, 26, window, kImageResizeToPercentLabelId,
+                68, 321, 168, 26, window, kImageResizeToPercentLabelId,
                 state->instance, state->settingsFont);
             state->imageResizeToPercentEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
-                230, 221, 64, 27, window, kImageResizeToPercentEditId,
+                240, 316, 64, 27, window, kImageResizeToPercentEditId,
                 state->instance, state->settingsFont);
             SendMessageW(state->imageResizeToPercentEdit, EM_LIMITTEXT, 4, 0);
             SetWindowTextW(
@@ -4139,47 +4427,47 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->imageResizeToPercentUnitLabel = CreateSettingsControl(
                 0, L"STATIC", L"%",
                 WS_CHILD | SS_LEFT,
-                300, 226, 24, 26, window, kImageResizeToPercentUnitLabelId,
+                310, 321, 24, 26, window, kImageResizeToPercentUnitLabelId,
                 state->instance, state->settingsFont);
             state->imageAutoFitRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Autofit...",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                30, 263, 450, 28, window, kImageAutoFitRadioId,
+                40, 349, 450, 28, window, kImageAutoFitRadioId,
                 state->instance, state->settingsFont);
             state->imageSmallGroup = CreateSettingsControl(
                 0, L"BUTTON", L"If the image is too small",
                 WS_CHILD | BS_GROUPBOX,
-                30, 300, 444, 220, window, kImageSmallGroupId,
+                30, 380, 444, 176, window, kImageSmallGroupId,
                 state->instance, state->settingsFont);
             state->imageLargeGroup = CreateSettingsControl(
                 0, L"BUTTON", L"If the image is too large",
                 WS_CHILD | BS_GROUPBOX,
-                490, 300, 444, 220, window, kImageLargeGroupId,
+                490, 380, 444, 176, window, kImageLargeGroupId,
                 state->instance, state->settingsFont);
             state->imageSmallCenteredRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Centered - display without enlarging",
                 WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-                50, 326, 390, 28, window, kImageSmallCenteredRadioId,
+                50, 403, 390, 28, window, kImageSmallCenteredRadioId,
                 state->instance, state->settingsFont);
             state->imageSmallTileRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Tile",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                50, 360, 390, 28, window, kImageSmallTileRadioId,
+                50, 433, 390, 28, window, kImageSmallTileRadioId,
                 state->instance, state->settingsFont);
             state->imageSmallFitRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Fit - enlarge to touch the frame",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                50, 394, 390, 28, window, kImageSmallFitRadioId,
+                50, 463, 390, 28, window, kImageSmallFitRadioId,
                 state->instance, state->settingsFont);
             state->imageMaxEnlargeLabel = CreateSettingsControl(
                 0, L"STATIC", L"Maximum enlargement:",
                 WS_CHILD | SS_LEFT,
-                72, 432, 170, 26, window, kImageMaxEnlargeLabelId,
+                72, 497, 170, 26, window, kImageMaxEnlargeLabelId,
                 state->instance, state->settingsFont);
             state->imageMaxEnlargePercentEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
-                247, 427, 64, 27, window, kImageMaxEnlargePercentEditId,
+                247, 492, 64, 27, window, kImageMaxEnlargePercentEditId,
                 state->instance, state->settingsFont);
             SendMessageW(state->imageMaxEnlargePercentEdit, EM_LIMITTEXT, 4, 0);
             SetWindowTextW(
@@ -4189,22 +4477,22 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->imageMaxEnlargePercentLabel = CreateSettingsControl(
                 0, L"STATIC", L"%",
                 WS_CHILD | SS_LEFT,
-                315, 432, 32, 26, window, kImageMaxEnlargePercentLabelId,
+                315, 497, 32, 26, window, kImageMaxEnlargePercentLabelId,
                 state->instance, state->settingsFont);
             state->imageLargeCenteredRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Centered - crop equally from each side",
                 WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-                510, 326, 390, 28, window, kImageLargeCenteredRadioId,
+                510, 403, 390, 28, window, kImageLargeCenteredRadioId,
                 state->instance, state->settingsFont);
             state->imageLargeFillRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Fill - crop the longer dimension",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                510, 360, 390, 28, window, kImageLargeFillRadioId,
+                510, 433, 390, 28, window, kImageLargeFillRadioId,
                 state->instance, state->settingsFont);
             state->imageLargeFitRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Fit - show the entire image",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                510, 394, 390, 28, window, kImageLargeFitRadioId,
+                510, 463, 390, 28, window, kImageLargeFitRadioId,
                 state->instance, state->settingsFont);
             SyncImageSizingControls(*state);
 
@@ -4574,6 +4862,8 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         switch (LOWORD(wParam)) {
         case kImageResizeToRadioId:
         case kImageAutoFitRadioId:
+        case kSameImageOnDisplaysRadioId:
+        case kSeparateImagesOnDisplaysRadioId:
         case kImageSmallCenteredRadioId:
         case kImageSmallTileRadioId:
         case kImageSmallFitRadioId:
@@ -4583,6 +4873,14 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             if (HIWORD(wParam) == BN_CLICKED) {
                 auto updated = state->settings;
                 switch (LOWORD(wParam)) {
+                case kSameImageOnDisplaysRadioId:
+                    updated.multiMonitorImageMode =
+                        swc::MultiMonitorImageMode::sameImage;
+                    break;
+                case kSeparateImagesOnDisplaysRadioId:
+                    updated.multiMonitorImageMode =
+                        swc::MultiMonitorImageMode::separateImages;
+                    break;
                 case kImageResizeToRadioId:
                     updated.imageSizingMode = swc::ImageSizingMode::resizeTo;
                     break;
@@ -4945,6 +5243,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->backgroundAdaptiveModeRadio = nullptr;
             state->backgroundFillColorLabel = nullptr;
             state->backgroundFillColorButton = nullptr;
+            state->multiMonitorSettingsGroup = nullptr;
+            state->imagePlacementGroup = nullptr;
+            state->sameImageOnDisplaysRadio = nullptr;
+            state->separateImagesOnDisplaysRadio = nullptr;
             state->imageResizeToRadio = nullptr;
             state->imageAutoFitRadio = nullptr;
             state->imageResizeToPercentEdit = nullptr;
@@ -5095,7 +5397,13 @@ void CompleteWallpaperChange(ResidentState& state) {
     }
     if (state.backgroundReapplyPending && !state.shuttingDown) {
         state.backgroundReapplyPending = false;
-        StartWallpaperChange(state, WallpaperRequest{false, {}, {}, true});
+        const bool reapplyMultiMonitorMode =
+            state.multiMonitorModeReapplyPending;
+        state.multiMonitorModeReapplyPending = false;
+        StartWallpaperChange(
+            state,
+            WallpaperRequest{
+                false, {}, {}, true, reapplyMultiMonitorMode});
     }
 }
 

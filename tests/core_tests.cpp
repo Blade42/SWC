@@ -175,6 +175,8 @@ int main() {
         assert(settings.smallImageMode == swc::SmallImageMode::fit);
         assert(settings.maxSmallImageEnlargePercent == 400);
         assert(settings.largeImageMode == swc::LargeImageMode::fit);
+        assert(settings.multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::separateImages);
     }
 
     {
@@ -183,13 +185,22 @@ int main() {
             L"resize_to_percent=125\n"
             L"autofit_small=tile\n"
             L"autofit_max_enlarge_percent=250\n"
-            L"autofit_large=fill\n");
+            L"autofit_large=fill\n"
+            L"multi_monitor_image_mode=SAME_IMAGE\n");
         const auto settings = swc::ParseSettings(input);
         assert(settings.imageSizingMode == swc::ImageSizingMode::resizeTo);
         assert(settings.resizeToPercent == 125);
         assert(settings.smallImageMode == swc::SmallImageMode::tile);
         assert(settings.maxSmallImageEnlargePercent == 250);
         assert(settings.largeImageMode == swc::LargeImageMode::fill);
+        assert(settings.multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::sameImage);
+    }
+
+    {
+        std::wistringstream input(L"multi_monitor_image_mode=SePaRaTe_ImAgEs\n");
+        assert(swc::ParseSettings(input).multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::separateImages);
     }
 
     {
@@ -199,12 +210,15 @@ int main() {
             L"autofit_max_enlarge_percent=99\n"
             L"autofit_max_enlarge_percent=1001\n"
             L"autofit_small=invalid\n"
-            L"autofit_large=invalid\n");
+            L"autofit_large=invalid\n"
+            L"multi_monitor_image_mode=invalid\n");
         const auto settings = swc::ParseSettings(input);
         assert(settings.resizeToPercent == 90);
         assert(settings.maxSmallImageEnlargePercent == 400);
         assert(settings.smallImageMode == swc::SmallImageMode::fit);
         assert(settings.largeImageMode == swc::LargeImageMode::fit);
+        assert(settings.multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::separateImages);
     }
 
     assert(swc::IsSupportedExtension(L".JPG"));
