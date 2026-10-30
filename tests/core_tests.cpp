@@ -100,6 +100,21 @@ int main() {
 
     {
         std::wistringstream input(L"");
+        assert(!swc::ParseSettings(input).startWithWindows);
+    }
+
+    {
+        std::wistringstream input(L"start_with_windows=TrUe\n");
+        assert(swc::ParseSettings(input).startWithWindows);
+    }
+
+    {
+        std::wistringstream input(L"start_with_windows=invalid\n");
+        assert(!swc::ParseSettings(input).startWithWindows);
+    }
+
+    {
+        std::wistringstream input(L"");
         const auto settings = swc::ParseSettings(input);
         assert(!settings.hasWindowBounds);
     }

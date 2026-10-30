@@ -73,6 +73,7 @@ struct Settings {
     std::wstring lastImage;
     bool changeOnStart = true;
     bool openWindowOnStart = false;
+    bool startWithWindows = false;
     WindowBounds windowBounds;
     bool hasWindowBounds = false;
     BackgroundFillMode backgroundFillMode = BackgroundFillMode::adaptiveToImage;
@@ -384,6 +385,12 @@ inline Settings ParseSettings(std::wistream& input) {
                 return static_cast<wchar_t>(std::towlower(ch));
             });
             settings.openWindowOnStart = normalized == L"true";
+        } else if (identifier == L"start_with_windows") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            settings.startWithWindows = normalized == L"true";
         } else if (identifier == L"settings_window_bounds") {
             std::wistringstream bounds(value);
             wchar_t separator = 0;

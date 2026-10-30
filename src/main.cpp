@@ -62,6 +62,7 @@ constexpr int kPlaylistHintId = 2009;
 constexpr int kMonitorPreviewPanelId = 2010;
 constexpr int kExitSettingsButtonId = 2011;
 constexpr int kOpenWindowOnStartCheckboxId = 2012;
+constexpr int kStartWithWindowsCheckboxId = 2034;
 constexpr int kBackgroundFillColorModeRadioId = 2013;
 constexpr int kBackgroundFillColorButtonId = 2014;
 constexpr int kBackgroundFillModeLabelId = 2015;
@@ -215,6 +216,84 @@ std::filesystem::path ExecutablePath() {
             Fail(L"The executable path is too long.");
         }
         buffer.resize(std::min<std::size_t>(buffer.size() * 2, 32768));
+    }
+}
+
+void SetStartWithWindows(bool enabled) {
+    constexpr wchar_t runKeyPath[] =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    constexpr wchar_t valueName[] = L"Simple Wallpaper Changer";
+    HKEY key = nullptr;
+
+    if (enabled) {
+        DWORD disposition = 0;
+        const LSTATUS openResult = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            runKeyPath,
+            0,
+            nullptr,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            nullptr,
+            &key,
+            &disposition);
+        if (openResult != ERROR_SUCCESS) {
+            FailWin32(L"Could not open the current-user startup registry key", openResult);
+        }
+
+        struct RegistryKeyCloser {
+            HKEY value;
+            ~RegistryKeyCloser() {
+                if (value) {
+                    RegCloseKey(value);
+                }
+            }
+        } closer{key};
+
+        const std::wstring command = L"\"" + ExecutablePath().wstring() + L"\"";
+        const std::uint64_t byteCount =
+            (static_cast<std::uint64_t>(command.size()) + 1) * sizeof(wchar_t);
+        if (byteCount > std::numeric_limits<DWORD>::max()) {
+            Fail(L"The executable path is too long to register for Windows startup.");
+        }
+        const LSTATUS setResult = RegSetValueExW(
+            key,
+            valueName,
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(command.c_str()),
+            static_cast<DWORD>(byteCount));
+        if (setResult != ERROR_SUCCESS) {
+            FailWin32(L"Could not register the program to start with Windows", setResult);
+        }
+        return;
+    }
+
+    const LSTATUS openResult = RegOpenKeyExW(
+        HKEY_CURRENT_USER,
+        runKeyPath,
+        0,
+        KEY_SET_VALUE,
+        &key);
+    if (openResult == ERROR_FILE_NOT_FOUND) {
+        return;
+    }
+    if (openResult != ERROR_SUCCESS) {
+        FailWin32(L"Could not open the current-user startup registry key", openResult);
+    }
+
+    struct RegistryKeyCloser {
+        HKEY value;
+        ~RegistryKeyCloser() {
+            if (value) {
+                RegCloseKey(value);
+            }
+        }
+    } closer{key};
+
+    const LSTATUS deleteResult = RegDeleteValueW(key, valueName);
+    if (deleteResult != ERROR_SUCCESS && deleteResult != ERROR_FILE_NOT_FOUND) {
+        FailWin32(L"Could not remove the program from Windows startup", deleteResult);
     }
 }
 
@@ -1489,6 +1568,9 @@ void WriteSettingsFile(
         L"; Open the Settings window when the program starts: true or false.\r\n";
     contents += L"open_window_on_start=" +
         std::wstring(settings.openWindowOnStart ? L"true" : L"false") + L"\r\n"
+        L"; Start the program automatically with the current Windows user: true or false.\r\n";
+    contents += L"start_with_windows=" +
+        std::wstring(settings.startWithWindows ? L"true" : L"false") + L"\r\n"
         L"; Settings window position and size (left,top,width,height); maintained automatically.\r\n";
     if (settings.hasWindowBounds) {
         contents += L"settings_window_bounds=" +
@@ -1594,6 +1676,7 @@ void UpdateUserSettings(
     settings.sourceDirectories = preferences.sourceDirectories;
     settings.changeOnStart = preferences.changeOnStart;
     settings.openWindowOnStart = preferences.openWindowOnStart;
+    settings.startWithWindows = preferences.startWithWindows;
     settings.backgroundFillMode = preferences.backgroundFillMode;
     settings.backgroundFillColor = preferences.backgroundFillColor;
     settings.imageSizingMode = preferences.imageSizingMode;
@@ -1972,6 +2055,7 @@ struct ResidentState {
     HWND monitorPreviewPanel = nullptr;
     HWND changeOnStartCheckbox = nullptr;
     HWND openWindowOnStartCheckbox = nullptr;
+    HWND startWithWindowsCheckbox = nullptr;
     HWND backgroundFillModeLabel = nullptr;
     HWND backgroundFillColorModeRadio = nullptr;
     HWND backgroundAdaptiveModeRadio = nullptr;
@@ -3412,6 +3496,7 @@ void ShowSettingsPage(ResidentState& state) {
     const bool backgroundPage = page == 3;
     ShowWindow(state.changeOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.openWindowOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.startWithWindowsCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.sourceDirectoryList, sourcesPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.sourceDirectoryHint, sourcesPage ? SW_SHOW : SW_HIDE);
     ShowWindow(GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
@@ -3981,6 +4066,16 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 BM_SETCHECK,
                 state->settings.openWindowOnStart ? BST_CHECKED : BST_UNCHECKED,
                 0);
+            state->startWithWindowsCheckbox = CreateSettingsControl(
+                0, L"BUTTON", L"Start with Windows",
+                WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+                30, 251, 900, 28, window, kStartWithWindowsCheckboxId,
+                state->instance, state->settingsFont);
+            SendMessageW(
+                state->startWithWindowsCheckbox,
+                BM_SETCHECK,
+                state->settings.startWithWindows ? BST_CHECKED : BST_UNCHECKED,
+                0);
 
             state->backgroundFillModeLabel = CreateSettingsControl(
                 0, L"STATIC", L"How to fill areas not covered by the image:",
@@ -4549,45 +4644,85 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
         case kChangeOnStartCheckboxId:
         case kOpenWindowOnStartCheckboxId:
+        case kStartWithWindowsCheckboxId:
             if (HIWORD(wParam) == BN_CLICKED) {
                 const bool openWindowSetting =
                     LOWORD(wParam) == kOpenWindowOnStartCheckboxId;
-                const HWND checkbox = openWindowSetting
+                const bool startWithWindowsSetting =
+                    LOWORD(wParam) == kStartWithWindowsCheckboxId;
+                const HWND checkbox = startWithWindowsSetting
+                    ? state->startWithWindowsCheckbox
+                    : openWindowSetting
                     ? state->openWindowOnStartCheckbox
                     : state->changeOnStartCheckbox;
                 auto updated = state->settings;
                 const bool checked =
                     SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                if (openWindowSetting) {
+                if (startWithWindowsSetting) {
+                    updated.startWithWindows = checked;
+                } else if (openWindowSetting) {
                     updated.openWindowOnStart = checked;
                 } else {
                     updated.changeOnStart = checked;
                 }
+                bool registryChanged = false;
                 try {
+                    if (startWithWindowsSetting) {
+                        SetStartWithWindows(checked);
+                        registryChanged = true;
+                    }
                     UpdateUserSettings(state->settingsPath, updated);
                     state->settings = std::move(updated);
                 } catch (const Failure& failure) {
+                    std::wstring error = failure.message;
+                    if (registryChanged) {
+                        try {
+                            SetStartWithWindows(state->settings.startWithWindows);
+                        } catch (const Failure& rollbackFailure) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry: " + rollbackFailure.message;
+                        } catch (const std::exception&) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry due to an unexpected error.";
+                        }
+                    }
                     SendMessageW(
                         checkbox,
                         BM_SETCHECK,
-                        (openWindowSetting
+                        (startWithWindowsSetting
+                            ? state->settings.startWithWindows
+                            : openWindowSetting
                             ? state->settings.openWindowOnStart
                             : state->settings.changeOnStart)
                             ? BST_CHECKED
                             : BST_UNCHECKED,
                         0);
-                    ShowError(failure.message, window);
+                    ShowError(error, window);
                 } catch (const std::exception&) {
+                    std::wstring error = L"Could not save the Startup setting.";
+                    if (registryChanged) {
+                        try {
+                            SetStartWithWindows(state->settings.startWithWindows);
+                        } catch (const Failure& rollbackFailure) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry: " + rollbackFailure.message;
+                        } catch (const std::exception&) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry due to an unexpected error.";
+                        }
+                    }
                     SendMessageW(
                         checkbox,
                         BM_SETCHECK,
-                        (openWindowSetting
+                        (startWithWindowsSetting
+                            ? state->settings.startWithWindows
+                            : openWindowSetting
                             ? state->settings.openWindowOnStart
                             : state->settings.changeOnStart)
                             ? BST_CHECKED
                             : BST_UNCHECKED,
                         0);
-                    ShowError(L"Could not save the Startup setting.", window);
+                    ShowError(error, window);
                 }
                 return 0;
             }
@@ -4804,6 +4939,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->monitorPreviewPanel = nullptr;
             state->changeOnStartCheckbox = nullptr;
             state->openWindowOnStartCheckbox = nullptr;
+            state->startWithWindowsCheckbox = nullptr;
             state->backgroundFillModeLabel = nullptr;
             state->backgroundFillColorModeRadio = nullptr;
             state->backgroundAdaptiveModeRadio = nullptr;
