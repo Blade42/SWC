@@ -50,6 +50,10 @@ constexpr UINT kNextCommandId = 1001;
 constexpr UINT kPreviousCommandId = 1002;
 constexpr UINT kExitCommandId = 1003;
 constexpr UINT kSettingsCommandId = 1004;
+constexpr UINT kStartCountdownCommandId = 1005;
+constexpr UINT kStopCountdownCommandId = 1006;
+constexpr UINT kPauseCountdownCommandId = 1007;
+constexpr UINT kResumeCountdownCommandId = 1008;
 constexpr UINT_PTR kWorkerPollTimerId = 1;
 constexpr int kSettingsTabsId = 2001;
 constexpr int kChangeOnStartCheckboxId = 2002;
@@ -2388,7 +2392,11 @@ struct ResidentState {
     HWND playlistDragGhost = nullptr;
     int monitorDropTarget = -1;
     NOTIFYICONDATAW icon{};
+    HICON defaultTrayIcon = nullptr;
+    HICON countdownTrayIcon = nullptr;
+    std::wstring lastTrayIconKey;
     bool iconAdded = false;
+    bool trayIconUpdateFailed = false;
     bool changeRunning = false;
     bool backgroundReapplyPending = false;
     bool multiMonitorModeReapplyPending = false;
@@ -2413,6 +2421,209 @@ std::wstring FormatCountdown(std::uint32_t seconds) {
     formatted << std::setfill(L'0') << std::setw(2) << hours << L":"
         << std::setw(2) << minutes << L":" << std::setw(2) << remainder;
     return formatted.str();
+}
+
+std::wstring FormatTrayCountdown(std::uint32_t seconds) {
+    return swc::FormatCountdownTrayValue(seconds);
+}
+
+HICON CreateCountdownTrayIcon(const std::wstring& text) {
+    constexpr int iconSize = 64;
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = iconSize;
+    bitmapInfo.bmiHeader.biHeight = -iconSize;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* pixels = nullptr;
+    HBITMAP colorBitmap = CreateDIBSection(
+        nullptr, &bitmapInfo, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    if (!colorBitmap || !pixels) {
+        if (colorBitmap) {
+            DeleteObject(colorBitmap);
+        }
+        return nullptr;
+    }
+    auto* bgraPixels = static_cast<std::uint32_t*>(pixels);
+    std::fill_n(
+        bgraPixels,
+        iconSize * iconSize,
+        static_cast<std::uint32_t>(RGB(20, 42, 68)) | 0xFF000000);
+
+    HDC drawContext = CreateCompatibleDC(nullptr);
+    if (!drawContext) {
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(drawContext, colorBitmap);
+    RECT background{2, 2, iconSize - 2, iconSize - 2};
+    HBRUSH backgroundBrush = CreateSolidBrush(RGB(20, 42, 68));
+    HPEN borderPen = CreatePen(PS_SOLID, 4, RGB(64, 190, 220));
+    HFONT textFont = CreateFontW(
+        -35, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    if (!backgroundBrush || !borderPen || !textFont) {
+        if (textFont) {
+            DeleteObject(textFont);
+        }
+        if (borderPen) {
+            DeleteObject(borderPen);
+        }
+        if (backgroundBrush) {
+            DeleteObject(backgroundBrush);
+        }
+        SelectObject(drawContext, oldBitmap);
+        DeleteDC(drawContext);
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    HGDIOBJ oldBrush = SelectObject(drawContext, backgroundBrush);
+    HGDIOBJ oldPen = SelectObject(drawContext, borderPen);
+    RoundRect(drawContext, 2, 2, iconSize - 2, iconSize - 2, 14, 14);
+    SetBkMode(drawContext, TRANSPARENT);
+    SetTextColor(drawContext, RGB(255, 255, 255));
+    HGDIOBJ oldFont = SelectObject(drawContext, textFont);
+    DrawTextW(
+        drawContext,
+        text.c_str(),
+        static_cast<int>(text.size()),
+        &background,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    for (int y = 0; y < iconSize; ++y) {
+        for (int x = 0; x < iconSize; ++x) {
+            const bool insideHorizontal = x >= 9 && x <= 54;
+            const bool insideVertical = y >= 9 && y <= 54;
+            bool insideRoundedCorners = insideHorizontal || insideVertical;
+            if (!insideRoundedCorners && x >= 2 && x <= 61 && y >= 2 && y <= 61) {
+                const int cornerCenterX = x < 9 ? 9 : 54;
+                const int cornerCenterY = y < 9 ? 9 : 54;
+                const int dx = x - cornerCenterX;
+                const int dy = y - cornerCenterY;
+                insideRoundedCorners = dx * dx + dy * dy <= 49;
+            }
+            const int index = y * iconSize + x;
+            bgraPixels[index] =
+                (bgraPixels[index] & 0x00FFFFFF) |
+                (insideRoundedCorners ? 0xFF000000 : 0);
+        }
+    }
+
+    HBITMAP maskBitmap = CreateBitmap(iconSize, iconSize, 1, 1, nullptr);
+    HDC maskContext = maskBitmap ? CreateCompatibleDC(nullptr) : nullptr;
+    bool maskReady = maskContext != nullptr;
+    if (maskReady) {
+        HGDIOBJ oldMaskBitmap = SelectObject(maskContext, maskBitmap);
+        HBRUSH transparentBrush = CreateSolidBrush(RGB(255, 255, 255));
+        HBRUSH opaqueBrush = CreateSolidBrush(RGB(0, 0, 0));
+        HPEN maskPen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+        if (transparentBrush && opaqueBrush && maskPen) {
+            PatBlt(maskContext, 0, 0, iconSize, iconSize, WHITENESS);
+            SelectObject(maskContext, opaqueBrush);
+            SelectObject(maskContext, maskPen);
+            RoundRect(maskContext, 2, 2, iconSize - 2, iconSize - 2, 14, 14);
+        } else {
+            maskReady = false;
+        }
+        if (maskPen) {
+            DeleteObject(maskPen);
+        }
+        if (opaqueBrush) {
+            DeleteObject(opaqueBrush);
+        }
+        if (transparentBrush) {
+            DeleteObject(transparentBrush);
+        }
+        SelectObject(maskContext, oldMaskBitmap);
+        DeleteDC(maskContext);
+    }
+
+    HICON icon = nullptr;
+    if (maskReady) {
+        ICONINFO iconInfo{};
+        iconInfo.fIcon = TRUE;
+        iconInfo.hbmColor = colorBitmap;
+        iconInfo.hbmMask = maskBitmap;
+        icon = CreateIconIndirect(&iconInfo);
+    }
+
+    DeleteObject(maskBitmap);
+    SelectObject(drawContext, oldFont);
+    SelectObject(drawContext, oldPen);
+    SelectObject(drawContext, oldBrush);
+    DeleteObject(textFont);
+    DeleteObject(borderPen);
+    DeleteObject(backgroundBrush);
+    SelectObject(drawContext, oldBitmap);
+    DeleteDC(drawContext);
+    DeleteObject(colorBitmap);
+    return icon;
+}
+
+void UpdateTrayIcon(ResidentState& state, std::uint32_t remainingSeconds) {
+    if (!state.iconAdded) {
+        return;
+    }
+
+    const std::wstring key = state.settings.countdownEnabled
+        ? L"timer:" + FormatTrayCountdown(remainingSeconds)
+        : L"stopped";
+    if (key == state.lastTrayIconKey) {
+        return;
+    }
+
+    HICON nextIcon = state.defaultTrayIcon;
+    HICON newlyCreatedIcon = nullptr;
+    if (state.settings.countdownEnabled) {
+        newlyCreatedIcon = CreateCountdownTrayIcon(
+            FormatTrayCountdown(remainingSeconds));
+        if (!newlyCreatedIcon) {
+            if (!state.trayIconUpdateFailed) {
+                ShowError(
+                    L"Could not create the countdown tray icon: " +
+                        Win32Message(GetLastError()),
+                    state.window);
+                state.trayIconUpdateFailed = true;
+            }
+            return;
+        }
+        nextIcon = newlyCreatedIcon;
+    }
+
+    const HICON previousCountdownIcon = state.countdownTrayIcon;
+    state.icon.hIcon = nextIcon;
+    state.icon.uFlags = NIF_ICON;
+    if (!Shell_NotifyIconW(NIM_MODIFY, &state.icon)) {
+        const DWORD error = GetLastError();
+        state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        state.icon.hIcon = previousCountdownIcon
+            ? previousCountdownIcon
+            : state.defaultTrayIcon;
+        if (newlyCreatedIcon) {
+            DestroyIcon(newlyCreatedIcon);
+        }
+        if (!state.trayIconUpdateFailed) {
+            ShowError(
+                L"Could not update the countdown tray icon: " +
+                    Win32Message(error),
+                state.window);
+            state.trayIconUpdateFailed = true;
+        }
+        return;
+    }
+
+    state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    state.countdownTrayIcon = newlyCreatedIcon;
+    if (previousCountdownIcon) {
+        DestroyIcon(previousCountdownIcon);
+    }
+    state.lastTrayIconKey = key;
+    state.trayIconUpdateFailed = false;
 }
 
 std::uint32_t CurrentCountdownSeconds(const ResidentState& state) {
@@ -2479,12 +2690,14 @@ void SyncCountdownControls(ResidentState& state) {
 }
 
 void RefreshCountdownDisplay(ResidentState& state) {
-    if (!state.countdownDisplay) {
-        return;
-    }
     const std::uint32_t remaining = CurrentCountdownSeconds(state);
+    UpdateTrayIcon(state, remaining);
     if (remaining != state.lastDisplayedCountdown) {
-        SetWindowTextW(state.countdownDisplay, FormatCountdown(remaining).c_str());
+        if (state.countdownDisplay) {
+            SetWindowTextW(
+                state.countdownDisplay,
+                FormatCountdown(remaining).c_str());
+        }
         state.lastDisplayedCountdown = remaining;
     }
 }
@@ -5973,20 +6186,24 @@ bool AddTrayIcon(ResidentState& state) {
     state.icon.uID = kTrayIconId;
     state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     state.icon.uCallbackMessage = kTrayCallbackMessage;
-    state.icon.hIcon = LoadIconW(state.instance, MAKEINTRESOURCEW(IDI_TRAY_ICON));
-    if (!state.icon.hIcon) {
+    state.defaultTrayIcon =
+        LoadIconW(state.instance, MAKEINTRESOURCEW(IDI_TRAY_ICON));
+    if (!state.defaultTrayIcon) {
         state.startupError = L"Could not load the tray icon resource.";
         return false;
     }
+    state.icon.hIcon = state.defaultTrayIcon;
     lstrcpynW(
         state.icon.szTip,
         L"Simple Wallpaper Changer",
         static_cast<int>(std::size(state.icon.szTip)));
     if (!Shell_NotifyIconW(NIM_ADD, &state.icon)) {
+        state.icon.hIcon = nullptr;
         state.startupError = L"Could not create the tray icon: " + Win32Message(GetLastError());
         return false;
     }
     state.iconAdded = true;
+    state.lastTrayIconKey.clear();
     return true;
 }
 
@@ -5995,6 +6212,12 @@ void RemoveTrayIcon(ResidentState& state) {
         Shell_NotifyIconW(NIM_DELETE, &state.icon);
         state.iconAdded = false;
     }
+    if (state.countdownTrayIcon) {
+        DestroyIcon(state.countdownTrayIcon);
+        state.countdownTrayIcon = nullptr;
+    }
+    state.defaultTrayIcon = nullptr;
+    state.icon.hIcon = nullptr;
 }
 
 void CompleteWallpaperChange(ResidentState& state) {
@@ -6093,10 +6316,39 @@ void ShowTrayMenu(ResidentState& state) {
         ShowError(L"Could not create the tray menu: " + Win32Message(GetLastError()), state.window);
         return;
     }
-    if (!AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") ||
-        !AppendMenuW(menu, MF_STRING, kPreviousCommandId, L"Previous") ||
-        !AppendMenuW(menu, MF_STRING, kSettingsCommandId, L"Settings...") ||
-        !AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit")) {
+    bool menuCreated =
+        AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") &&
+        AppendMenuW(menu, MF_STRING, kPreviousCommandId, L"Previous") &&
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (menuCreated) {
+        menuCreated = AppendMenuW(
+            menu,
+            MF_STRING,
+            state.settings.countdownEnabled
+                ? kStopCountdownCommandId
+                : kStartCountdownCommandId,
+            state.settings.countdownEnabled
+                ? L"Stop Countdown"
+                : L"Start Countdown");
+    }
+    if (menuCreated && state.settings.countdownEnabled) {
+        menuCreated = AppendMenuW(
+            menu,
+            MF_STRING,
+            state.countdownPaused
+                ? kResumeCountdownCommandId
+                : kPauseCountdownCommandId,
+            state.countdownPaused
+                ? L"Resume Countdown"
+                : L"Pause Countdown");
+    }
+    if (menuCreated) {
+        menuCreated =
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr) &&
+            AppendMenuW(menu, MF_STRING, kSettingsCommandId, L"Settings...") &&
+            AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit");
+    }
+    if (!menuCreated) {
         const DWORD error = GetLastError();
         DestroyMenu(menu);
         ShowError(L"Could not populate the tray menu: " + Win32Message(error), state.window);
@@ -6189,6 +6441,18 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
             return 0;
         case kPreviousCommandId:
             RequestNextOrPrevious(*state, true);
+            return 0;
+        case kStartCountdownCommandId:
+            StartOrStopCountdown(*state, true, state->window);
+            return 0;
+        case kStopCountdownCommandId:
+            StartOrStopCountdown(*state, false, state->window);
+            return 0;
+        case kPauseCountdownCommandId:
+            ToggleCountdownPause(*state);
+            return 0;
+        case kResumeCountdownCommandId:
+            ToggleCountdownPause(*state);
             return 0;
         case kSettingsCommandId:
             ShowSettingsWindow(*state);

@@ -234,6 +234,15 @@ int main() {
     }
 
     {
+        assert(swc::FormatCountdownTrayValue(0) == L"00");
+        assert(swc::FormatCountdownTrayValue(9) == L"09");
+        assert(swc::FormatCountdownTrayValue(65) == L"01");
+        assert(swc::FormatCountdownTrayValue(59 * 60 + 59) == L"59");
+        assert(swc::FormatCountdownTrayValue(3600 + 5 * 60 + 9) == L"01");
+        assert(swc::FormatCountdownTrayValue(99 * 3600 + 59 * 60 + 59) == L"99");
+    }
+
+    {
         std::wistringstream input(
             L"countdown_enabled=true\n"
             L"countdown_hours=100\n"

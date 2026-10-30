@@ -101,6 +101,19 @@ inline std::uint32_t CountdownDurationSeconds(const Settings& settings) {
         settings.countdownMinutes * 60 + settings.countdownSeconds;
 }
 
+inline std::wstring FormatCountdownTrayValue(std::uint32_t seconds) {
+    std::uint32_t value = seconds % 60;
+    if (seconds >= 3600) {
+        value = seconds / 3600;
+    } else if (seconds >= 60) {
+        value = seconds / 60;
+    }
+
+    std::wostringstream formatted;
+    formatted << std::setfill(L'0') << std::setw(2) << value;
+    return formatted.str();
+}
+
 inline bool HasEnabledSourceDirectory(
     const std::vector<SourceDirectory>& sourceDirectories) {
     return std::any_of(
