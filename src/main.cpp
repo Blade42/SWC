@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cwctype>
@@ -88,6 +89,20 @@ constexpr int kSameImageOnDisplaysRadioId = 2035;
 constexpr int kSeparateImagesOnDisplaysRadioId = 2036;
 constexpr int kMultiMonitorSettingsGroupId = 2037;
 constexpr int kImagePlacementGroupId = 2038;
+constexpr int kCountdownEnabledCheckboxId = 2040;
+constexpr int kCountdownHoursEditId = 2041;
+constexpr int kCountdownMinutesEditId = 2042;
+constexpr int kCountdownSecondsEditId = 2043;
+constexpr int kCountdownPreviousButtonId = 2044;
+constexpr int kCountdownStartStopButtonId = 2045;
+constexpr int kCountdownPauseResumeButtonId = 2046;
+constexpr int kCountdownRestartButtonId = 2047;
+constexpr int kCountdownNextButtonId = 2048;
+constexpr int kCountdownDurationGroupId = 2049;
+constexpr int kCountdownDisplayId = 2051;
+constexpr int kCountdownHoursLabelId = 2052;
+constexpr int kCountdownMinutesLabelId = 2053;
+constexpr int kCountdownSecondsLabelId = 2054;
 constexpr UINT kSetDisplayCommandBase = 40000;
 constexpr int kPlaylistThumbnailSize = 64;
 constexpr std::size_t kPlaylistThumbnailCacheLimit = 512;
@@ -1630,6 +1645,12 @@ void WriteSettingsFile(
             settings.multiMonitorImageMode == swc::MultiMonitorImageMode::sameImage
                 ? L"same_image"
                 : L"separate_images") + L"\r\n"
+        L"; Timed wallpaper changes: enabled, hours, minutes, seconds.\r\n"
+        L"countdown_enabled=" +
+        std::wstring(settings.countdownEnabled ? L"true" : L"false") + L"\r\n"
+        L"countdown_hours=" + std::to_wstring(settings.countdownHours) + L"\r\n"
+        L"countdown_minutes=" + std::to_wstring(settings.countdownMinutes) + L"\r\n"
+        L"countdown_seconds=" + std::to_wstring(settings.countdownSeconds) + L"\r\n"
         L"; Example configuration:\r\n"
         L"; source_directories=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
         L"; source_directories=-D:\\SeasonalWallpapers\r\n"
@@ -1695,6 +1716,10 @@ void UpdateUserSettings(
     settings.maxSmallImageEnlargePercent = preferences.maxSmallImageEnlargePercent;
     settings.largeImageMode = preferences.largeImageMode;
     settings.multiMonitorImageMode = preferences.multiMonitorImageMode;
+    settings.countdownEnabled = preferences.countdownEnabled;
+    settings.countdownHours = preferences.countdownHours;
+    settings.countdownMinutes = preferences.countdownMinutes;
+    settings.countdownSeconds = preferences.countdownSeconds;
     WriteSettingsFile(path, settings);
 }
 
@@ -2286,6 +2311,20 @@ struct ResidentState {
     HWND settingsWindow = nullptr;
     HWND settingsTabs = nullptr;
     HWND monitorPreviewPanel = nullptr;
+    HWND countdownDisplay = nullptr;
+    HWND countdownPreviousButton = nullptr;
+    HWND countdownStartStopButton = nullptr;
+    HWND countdownPauseResumeButton = nullptr;
+    HWND countdownRestartButton = nullptr;
+    HWND countdownNextButton = nullptr;
+    HWND countdownEnabledCheckbox = nullptr;
+    HWND countdownDurationGroup = nullptr;
+    HWND countdownHoursEdit = nullptr;
+    HWND countdownMinutesEdit = nullptr;
+    HWND countdownSecondsEdit = nullptr;
+    HWND countdownHoursLabel = nullptr;
+    HWND countdownMinutesLabel = nullptr;
+    HWND countdownSecondsLabel = nullptr;
     HWND changeOnStartCheckbox = nullptr;
     HWND openWindowOnStartCheckbox = nullptr;
     HWND startWithWindowsCheckbox = nullptr;
@@ -2321,6 +2360,7 @@ struct ResidentState {
     HWND playlistList = nullptr;
     HWND playlistHint = nullptr;
     HFONT settingsFont = nullptr;
+    HFONT countdownFont = nullptr;
     HIMAGELIST playlistImageList = nullptr;
     std::filesystem::path settingsPath;
     swc::Settings settings;
@@ -2352,6 +2392,11 @@ struct ResidentState {
     bool changeRunning = false;
     bool backgroundReapplyPending = false;
     bool multiMonitorModeReapplyPending = false;
+    bool countdownPaused = false;
+    bool timerNextPending = false;
+    std::uint32_t countdownRemainingSeconds = 600;
+    std::uint32_t lastDisplayedCountdown = std::numeric_limits<std::uint32_t>::max();
+    std::chrono::steady_clock::time_point countdownDeadline{};
     bool shuttingDown = false;
     std::atomic_bool changeFinished = false;
     std::thread changeThread;
@@ -2359,6 +2404,207 @@ struct ResidentState {
     std::wstring changeError;
     std::wstring startupError;
 };
+
+std::wstring FormatCountdown(std::uint32_t seconds) {
+    const std::uint32_t hours = seconds / 3600;
+    const std::uint32_t minutes = (seconds / 60) % 60;
+    const std::uint32_t remainder = seconds % 60;
+    std::wostringstream formatted;
+    formatted << std::setfill(L'0') << std::setw(2) << hours << L":"
+        << std::setw(2) << minutes << L":" << std::setw(2) << remainder;
+    return formatted.str();
+}
+
+std::uint32_t CurrentCountdownSeconds(const ResidentState& state) {
+    if (!state.settings.countdownEnabled || state.countdownPaused) {
+        return state.countdownRemainingSeconds;
+    }
+
+    const auto remaining = state.countdownDeadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+        return 0;
+    }
+    const auto milliseconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+    return static_cast<std::uint32_t>((milliseconds + 999) / 1000);
+}
+
+void SyncCountdownControls(ResidentState& state) {
+    if (state.countdownEnabledCheckbox) {
+        SendMessageW(
+            state.countdownEnabledCheckbox,
+            BM_SETCHECK,
+            state.settings.countdownEnabled ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+    if (state.countdownHoursEdit) {
+        SetWindowTextW(
+            state.countdownHoursEdit,
+            std::to_wstring(state.settings.countdownHours).c_str());
+    }
+    if (state.countdownMinutesEdit) {
+        SetWindowTextW(
+            state.countdownMinutesEdit,
+            std::to_wstring(state.settings.countdownMinutes).c_str());
+    }
+    if (state.countdownSecondsEdit) {
+        SetWindowTextW(
+            state.countdownSecondsEdit,
+            std::to_wstring(state.settings.countdownSeconds).c_str());
+    }
+    if (state.countdownStartStopButton) {
+        SetWindowTextW(
+            state.countdownStartStopButton,
+            state.settings.countdownEnabled
+                ? L"Stop countdown"
+                : L"Start countdown");
+        InvalidateRect(state.countdownStartStopButton, nullptr, TRUE);
+    }
+    if (state.countdownPauseResumeButton) {
+        SetWindowTextW(
+            state.countdownPauseResumeButton,
+            state.countdownPaused
+                ? L"Resume countdown"
+                : L"Pause countdown");
+        EnableWindow(
+            state.countdownPauseResumeButton,
+            state.settings.countdownEnabled);
+        InvalidateRect(state.countdownPauseResumeButton, nullptr, TRUE);
+    }
+    if (state.countdownRestartButton) {
+        EnableWindow(state.countdownRestartButton, state.settings.countdownEnabled);
+        InvalidateRect(state.countdownRestartButton, nullptr, TRUE);
+    }
+    state.lastDisplayedCountdown = std::numeric_limits<std::uint32_t>::max();
+}
+
+void RefreshCountdownDisplay(ResidentState& state) {
+    if (!state.countdownDisplay) {
+        return;
+    }
+    const std::uint32_t remaining = CurrentCountdownSeconds(state);
+    if (remaining != state.lastDisplayedCountdown) {
+        SetWindowTextW(state.countdownDisplay, FormatCountdown(remaining).c_str());
+        state.lastDisplayedCountdown = remaining;
+    }
+}
+
+void DrawCountdownButton(const DRAWITEMSTRUCT& draw, const ResidentState& state) {
+    UINT frameState = DFCS_BUTTONPUSH;
+    if ((draw.itemState & ODS_SELECTED) != 0) {
+        frameState |= DFCS_PUSHED;
+    }
+    if ((draw.itemState & ODS_DISABLED) != 0) {
+        frameState |= DFCS_INACTIVE;
+    }
+    DrawFrameControl(draw.hDC, const_cast<RECT*>(&draw.rcItem), DFC_BUTTON, frameState);
+
+    const int centerX = (draw.rcItem.left + draw.rcItem.right) / 2;
+    const int centerY = (draw.rcItem.top + draw.rcItem.bottom) / 2;
+    const int offset = (draw.itemState & ODS_SELECTED) != 0 ? 1 : 0;
+    const int colorIndex = (draw.itemState & ODS_DISABLED) != 0
+        ? COLOR_GRAYTEXT
+        : COLOR_BTNTEXT;
+    HPEN pen = CreatePen(PS_SOLID, 2, GetSysColor(colorIndex));
+    HGDIOBJ previousPen = SelectObject(draw.hDC, pen);
+    HGDIOBJ previousBrush = SelectObject(
+        draw.hDC,
+        GetSysColorBrush(colorIndex == COLOR_GRAYTEXT ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
+    const auto triangle = [&](POINT first, POINT second, POINT third) {
+        POINT points[] = {first, second, third};
+        Polygon(draw.hDC, points, static_cast<int>(std::size(points)));
+    };
+
+    switch (GetDlgCtrlID(draw.hwndItem)) {
+    case kCountdownPreviousButtonId:
+        MoveToEx(draw.hDC, centerX - 7 + offset, centerY - 8 + offset, nullptr);
+        LineTo(draw.hDC, centerX - 7 + offset, centerY + 8 + offset);
+        triangle(
+            {centerX - 5 + offset, centerY + offset},
+            {centerX + 6 + offset, centerY - 8 + offset},
+            {centerX + 6 + offset, centerY + 8 + offset});
+        break;
+    case kCountdownNextButtonId:
+        triangle(
+            {centerX + 5 + offset, centerY + offset},
+            {centerX - 6 + offset, centerY - 8 + offset},
+            {centerX - 6 + offset, centerY + 8 + offset});
+        MoveToEx(draw.hDC, centerX + 7 + offset, centerY - 8 + offset, nullptr);
+        LineTo(draw.hDC, centerX + 7 + offset, centerY + 8 + offset);
+        break;
+    case kCountdownStartStopButtonId:
+        if (state.settings.countdownEnabled) {
+            Rectangle(
+                draw.hDC,
+                centerX - 6 + offset,
+                centerY - 6 + offset,
+                centerX + 7 + offset,
+                centerY + 7 + offset);
+        } else {
+            triangle(
+                {centerX + 7 + offset, centerY + offset},
+                {centerX - 6 + offset, centerY - 8 + offset},
+                {centerX - 6 + offset, centerY + 8 + offset});
+        }
+        break;
+    case kCountdownPauseResumeButtonId:
+        if (state.countdownPaused) {
+            triangle(
+                {centerX + 7 + offset, centerY + offset},
+                {centerX - 6 + offset, centerY - 8 + offset},
+                {centerX - 6 + offset, centerY + 8 + offset});
+        } else {
+            Rectangle(
+                draw.hDC,
+                centerX - 7 + offset,
+                centerY - 7 + offset,
+                centerX - 2 + offset,
+                centerY + 8 + offset);
+            Rectangle(
+                draw.hDC,
+                centerX + 2 + offset,
+                centerY - 7 + offset,
+                centerX + 7 + offset,
+                centerY + 8 + offset);
+        }
+        break;
+    case kCountdownRestartButtonId:
+    {
+        POINT rewindArc[] = {
+            {centerX - 4 + offset, centerY - 6 + offset},
+            {centerX - 1 + offset, centerY - 8 + offset},
+            {centerX + 3 + offset, centerY - 7 + offset},
+            {centerX + 6 + offset, centerY - 4 + offset},
+            {centerX + 8 + offset, centerY + offset},
+            {centerX + 6 + offset, centerY + 4 + offset},
+            {centerX + 3 + offset, centerY + 6 + offset},
+            {centerX + offset, centerY + 7 + offset},
+            {centerX - 3 + offset, centerY + 6 + offset},
+            {centerX - 6 + offset, centerY + 4 + offset}};
+        HPEN rewindPen = CreatePen(PS_SOLID, 3, GetSysColor(colorIndex));
+        HGDIOBJ previousRewindPen = SelectObject(draw.hDC, rewindPen);
+        Polyline(draw.hDC, rewindArc, static_cast<int>(std::size(rewindArc)));
+        triangle(
+            {centerX - 9 + offset, centerY - 6 + offset},
+            {centerX - 3 + offset, centerY - 9 + offset},
+            {centerX - 3 + offset, centerY - 3 + offset});
+        SelectObject(draw.hDC, previousRewindPen);
+        DeleteObject(rewindPen);
+        break;
+    }
+    default:
+        break;
+    }
+
+    SelectObject(draw.hDC, previousBrush);
+    SelectObject(draw.hDC, previousPen);
+    DeleteObject(pen);
+    if ((draw.itemState & ODS_FOCUS) != 0) {
+        RECT focusRect = draw.rcItem;
+        InflateRect(&focusRect, -3, -3);
+        DrawFocusRect(draw.hDC, &focusRect);
+    }
+}
 
 void LayoutMonitorPreviews(ResidentState& state) {
     if (!state.monitorPreviewPanel) {
@@ -3474,7 +3720,27 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
     const int contentWidth = std::max(1, clientWidth - 24);
     const int footerY = std::max(0, clientHeight - 44);
     const int tabsY = 145;
-    moveControl(state.monitorPreviewPanel, 12, 12, contentWidth, 125);
+    moveControl(state.countdownDisplay, 12, 40, 220, 42);
+    const int countdownButtonWidth = 30;
+    const int countdownButtonGap = 4;
+    const int countdownButtonsWidth =
+        5 * countdownButtonWidth + 4 * countdownButtonGap;
+    const int countdownButtonsX = 12 + (220 - countdownButtonsWidth) / 2;
+    moveControl(state.countdownPreviousButton, countdownButtonsX, 86,
+        countdownButtonWidth, 30);
+    moveControl(state.countdownStartStopButton,
+        countdownButtonsX + countdownButtonWidth + countdownButtonGap,
+        86, countdownButtonWidth, 30);
+    moveControl(state.countdownPauseResumeButton,
+        countdownButtonsX + 2 * (countdownButtonWidth + countdownButtonGap),
+        86, countdownButtonWidth, 30);
+    moveControl(state.countdownRestartButton,
+        countdownButtonsX + 3 * (countdownButtonWidth + countdownButtonGap),
+        86, countdownButtonWidth, 30);
+    moveControl(state.countdownNextButton,
+        countdownButtonsX + 4 * (countdownButtonWidth + countdownButtonGap),
+        86, countdownButtonWidth, 30);
+    moveControl(state.monitorPreviewPanel, 242, 12, contentWidth - 230, 125);
     moveControl(
         state.settingsTabs,
         12,
@@ -3551,6 +3817,14 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
     moveControl(
         state.imageLargeFitRadio,
         imageLargeGroupX + 20, 463, imageGroupWidth - 40, 28);
+    moveControl(state.countdownEnabledCheckbox, 30, 190, clientWidth - 60, 28);
+    moveControl(state.countdownDurationGroup, 20, 232, clientWidth - 40, 104);
+    moveControl(state.countdownHoursLabel, 50, 260, 120, 24);
+    moveControl(state.countdownHoursEdit, 50, 286, 120, 30);
+    moveControl(state.countdownMinutesLabel, 250, 260, 120, 24);
+    moveControl(state.countdownMinutesEdit, 250, 286, 120, 30);
+    moveControl(state.countdownSecondsLabel, 450, 260, 120, 24);
+    moveControl(state.countdownSecondsEdit, 450, 286, 120, 30);
     moveControl(
         GetDlgItem(state.settingsWindow, kExitSettingsButtonId),
         clientWidth - 28 - 82 - 10 - 82,
@@ -3750,6 +4024,7 @@ void ShowSettingsPage(ResidentState& state) {
     const bool startupPage = page == 0;
     const bool sourcesPage = page == 1;
     const bool backgroundPage = page == 3;
+    const bool countdownPage = page == 5;
     ShowWindow(state.changeOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.openWindowOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.startWithWindowsCheckbox, startupPage ? SW_SHOW : SW_HIDE);
@@ -3793,7 +4068,17 @@ void ShowSettingsPage(ResidentState& state) {
     ShowWindow(state.imageLargeCenteredRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageLargeFillRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageLargeFitRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownEnabledCheckbox, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownDurationGroup, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownHoursLabel, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownMinutesLabel, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownSecondsLabel, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownHoursEdit, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownMinutesEdit, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownSecondsEdit, countdownPage ? SW_SHOW : SW_HIDE);
     SyncImageSizingControls(state);
+    SyncCountdownControls(state);
+    RefreshCountdownDisplay(state);
 }
 
 void SaveSourceDirectoryListWithError(
@@ -4017,6 +4302,175 @@ std::wstring SelectSourceDirectory(HWND owner, const std::wstring& currentDirect
 }
 
 void StartWallpaperChange(ResidentState& state, WallpaperRequest request = {});
+
+void ResetCountdown(ResidentState& state) {
+    state.countdownRemainingSeconds = swc::CountdownDurationSeconds(state.settings);
+    state.countdownPaused = false;
+    if (state.settings.countdownEnabled) {
+        state.countdownDeadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(state.countdownRemainingSeconds);
+    }
+    SyncCountdownControls(state);
+    RefreshCountdownDisplay(state);
+    if (state.countdownPauseResumeButton) {
+        InvalidateRect(state.countdownPauseResumeButton, nullptr, TRUE);
+    }
+}
+
+void StartOrStopCountdown(
+    ResidentState& state,
+    bool enabled,
+    HWND owner) {
+    auto updated = state.settings;
+    updated.countdownEnabled = enabled;
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        if (!enabled) {
+            state.timerNextPending = false;
+        }
+        ResetCountdown(state);
+    } catch (const Failure& failure) {
+        SyncCountdownControls(state);
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        SyncCountdownControls(state);
+        ShowError(L"Could not save the Countdown settings.", owner);
+    }
+}
+
+void ToggleCountdownPause(ResidentState& state) {
+    if (!state.settings.countdownEnabled) {
+        return;
+    }
+    if (!state.countdownPaused) {
+        const std::uint32_t remaining = CurrentCountdownSeconds(state);
+        if (remaining == 0) {
+            ResetCountdown(state);
+            if (state.changeRunning) {
+                state.timerNextPending = true;
+            } else {
+                StartWallpaperChange(state);
+            }
+            return;
+        }
+        state.countdownRemainingSeconds = remaining;
+        state.countdownPaused = true;
+    } else {
+        state.countdownPaused = false;
+        state.countdownDeadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(state.countdownRemainingSeconds);
+    }
+    SyncCountdownControls(state);
+    RefreshCountdownDisplay(state);
+    if (state.countdownPauseResumeButton) {
+        InvalidateRect(state.countdownPauseResumeButton, nullptr, TRUE);
+    }
+}
+
+std::wstring ReadEditText(HWND edit) {
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<std::size_t>(std::max(0, length)) + 1, L'\0');
+    const int copied = GetWindowTextW(
+        edit, text.data(), static_cast<int>(text.size()));
+    text.resize(static_cast<std::size_t>(std::max(0, copied)));
+    return text;
+}
+
+bool IsCountdownDurationEditId(int controlId) {
+    return controlId == kCountdownHoursEditId ||
+        controlId == kCountdownMinutesEditId ||
+        controlId == kCountdownSecondsEditId;
+}
+
+void SaveCountdownDuration(
+    ResidentState& state,
+    HWND owner,
+    bool force = false) {
+    const HWND focused = GetFocus();
+    if (!force && focused &&
+        IsCountdownDurationEditId(GetDlgCtrlID(focused))) {
+        return;
+    }
+
+    const std::wstring hours = ReadEditText(state.countdownHoursEdit);
+    const std::wstring minutes = ReadEditText(state.countdownMinutesEdit);
+    const std::wstring seconds = ReadEditText(state.countdownSecondsEdit);
+    std::uint32_t totalSeconds = 0;
+    if (!swc::ParseCountdownDuration(hours, minutes, seconds, totalSeconds)) {
+        ShowError(
+            L"Countdown time must be greater than zero. Hours must be 0-99; "
+            L"minutes and seconds must be 0-59.",
+            owner);
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+        return;
+    }
+
+    auto updated = state.settings;
+    swc::ParsePercent(hours, 0, 99, updated.countdownHours);
+    swc::ParsePercent(minutes, 0, 59, updated.countdownMinutes);
+    swc::ParsePercent(seconds, 0, 59, updated.countdownSeconds);
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        state.countdownRemainingSeconds = totalSeconds;
+        if (state.settings.countdownEnabled && !state.countdownPaused) {
+            state.countdownDeadline =
+                std::chrono::steady_clock::now() +
+                std::chrono::seconds(totalSeconds);
+        }
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+    } catch (const Failure& failure) {
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+        ShowError(L"Could not save the Countdown duration.", owner);
+    }
+}
+
+void RequestNextOrPrevious(
+    ResidentState& state,
+    bool previous,
+    bool fromCountdown = false) {
+    if (state.settings.countdownEnabled) {
+        ResetCountdown(state);
+    }
+    if (state.changeRunning) {
+        if (fromCountdown) {
+            state.timerNextPending = true;
+        } else {
+            ShowError(L"A wallpaper change is already in progress.", state.window);
+        }
+        return;
+    }
+    StartWallpaperChange(
+        state, previous ? WallpaperRequest{true, {}, {}} : WallpaperRequest{});
+}
+
+void ProcessCountdownTick(ResidentState& state) {
+    if (!state.settings.countdownEnabled || state.countdownPaused) {
+        RefreshCountdownDisplay(state);
+        return;
+    }
+    if (CurrentCountdownSeconds(state) > 0) {
+        RefreshCountdownDisplay(state);
+        return;
+    }
+
+    ResetCountdown(state);
+    if (state.changeRunning) {
+        state.timerNextPending = true;
+        return;
+    }
+    StartWallpaperChange(state);
+}
 
 void RequestBackgroundReapply(
     ResidentState& state,
@@ -4259,7 +4713,53 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         state->settingsWindow = window;
         try {
             state->settingsFont = CreateSettingsFont();
-            state->monitorPreviewPanel = CreateWindowExW(
+        LOGFONTW countdownFontDescription{};
+        countdownFontDescription.lfHeight = -34;
+        countdownFontDescription.lfWeight = FW_BOLD;
+        lstrcpynW(
+            countdownFontDescription.lfFaceName,
+            L"Segoe UI",
+            LF_FACESIZE);
+        state->countdownFont = CreateFontIndirectW(&countdownFontDescription);
+        if (!state->countdownFont) {
+            FailWin32(L"Could not create the countdown display font");
+        }
+        state->countdownDisplay = CreateSettingsControl(
+            0, L"STATIC", L"00:10:00",
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+            12, 40, 220, 42, window, kCountdownDisplayId,
+            state->instance, state->settingsFont);
+        SendMessageW(
+            state->countdownDisplay,
+            WM_SETFONT,
+            reinterpret_cast<WPARAM>(state->countdownFont),
+            TRUE);
+        state->countdownPreviousButton = CreateSettingsControl(
+            0, L"BUTTON", L"Previous image",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            39, 86, 30, 30, window, kCountdownPreviousButtonId,
+            state->instance, state->settingsFont);
+        state->countdownStartStopButton = CreateSettingsControl(
+            0, L"BUTTON", L"Start countdown",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            73, 86, 30, 30, window, kCountdownStartStopButtonId,
+            state->instance, state->settingsFont);
+        state->countdownPauseResumeButton = CreateSettingsControl(
+            0, L"BUTTON", L"Pause countdown",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            107, 86, 30, 30, window, kCountdownPauseResumeButtonId,
+            state->instance, state->settingsFont);
+        state->countdownRestartButton = CreateSettingsControl(
+            0, L"BUTTON", L"Restart countdown",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            141, 86, 30, 30, window, kCountdownRestartButtonId,
+            state->instance, state->settingsFont);
+        state->countdownNextButton = CreateSettingsControl(
+            0, L"BUTTON", L"Next image",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            175, 86, 30, 30, window, kCountdownNextButtonId,
+            state->instance, state->settingsFont);
+        state->monitorPreviewPanel = CreateWindowExW(
                 0,
                 kMonitorPreviewPanelClass,
                 L"",
@@ -4290,6 +4790,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             wchar_t playlistTabText[] = L"Playlist";
             wchar_t backgroundTabText[] = L"Background";
             wchar_t imageTabText[] = L"Image";
+            wchar_t countdownTabText[] = L"Countdown";
             TCITEMW tab{};
             tab.mask = TCIF_TEXT;
             tab.pszText = startupTabText;
@@ -4311,6 +4812,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             tab.pszText = imageTabText;
             if (TabCtrl_InsertItem(state->settingsTabs, 4, &tab) == -1) {
                 Fail(L"Could not add the Image settings tab.");
+            }
+            tab.pszText = countdownTabText;
+            if (TabCtrl_InsertItem(state->settingsTabs, 5, &tab) == -1) {
+                Fail(L"Could not add the Countdown settings tab.");
             }
             TabCtrl_SetCurSel(state->settingsTabs, 0);
 
@@ -4496,6 +5001,51 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 state->instance, state->settingsFont);
             SyncImageSizingControls(*state);
 
+            state->countdownEnabledCheckbox = CreateSettingsControl(
+                0, L"BUTTON", L"Enabled",
+                WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+                30, 190, 900, 28, window, kCountdownEnabledCheckboxId,
+                state->instance, state->settingsFont);
+            state->countdownDurationGroup = CreateSettingsControl(
+                0, L"BUTTON", L"Countdown time",
+                WS_CHILD | BS_GROUPBOX,
+                20, 232, kSettingsContentWidth - 40, 104, window,
+                kCountdownDurationGroupId, state->instance, state->settingsFont);
+            state->countdownHoursLabel = CreateSettingsControl(
+                0, L"STATIC", L"Hours (0-99)",
+                WS_CHILD | SS_LEFT,
+                50, 260, 120, 24, window, kCountdownHoursLabelId,
+                state->instance, state->settingsFont);
+            state->countdownHoursEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                50, 286, 120, 30, window, kCountdownHoursEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->countdownHoursEdit, EM_LIMITTEXT, 2, 0);
+            state->countdownMinutesLabel = CreateSettingsControl(
+                0, L"STATIC", L"Minutes (0-59)",
+                WS_CHILD | SS_LEFT,
+                250, 260, 120, 24, window, kCountdownMinutesLabelId,
+                state->instance, state->settingsFont);
+            state->countdownMinutesEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                250, 286, 120, 30, window, kCountdownMinutesEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->countdownMinutesEdit, EM_LIMITTEXT, 2, 0);
+            state->countdownSecondsLabel = CreateSettingsControl(
+                0, L"STATIC", L"Seconds (0-59)",
+                WS_CHILD | SS_LEFT,
+                450, 260, 120, 24, window, kCountdownSecondsLabelId,
+                state->instance, state->settingsFont);
+            state->countdownSecondsEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                450, 286, 120, 30, window, kCountdownSecondsEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->countdownSecondsEdit, EM_LIMITTEXT, 2, 0);
+            SyncCountdownControls(*state);
+
             state->sourceDirectoryList = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                 WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
@@ -4643,6 +5193,16 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         }
         return 0;
     case WM_DRAWITEM:
+        if (state && (
+                static_cast<int>(wParam) == kCountdownPreviousButtonId ||
+                static_cast<int>(wParam) == kCountdownStartStopButtonId ||
+                static_cast<int>(wParam) == kCountdownPauseResumeButtonId ||
+                static_cast<int>(wParam) == kCountdownRestartButtonId ||
+                static_cast<int>(wParam) == kCountdownNextButtonId)) {
+            DrawCountdownButton(
+                *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam), *state);
+            return TRUE;
+        }
         if (state && static_cast<int>(wParam) == kBackgroundFillColorButtonId) {
             const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
             const COLORREF color = RGB(
@@ -4860,6 +5420,59 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
         }
         switch (LOWORD(wParam)) {
+        case kCountdownEnabledCheckboxId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const bool enabled =
+                    SendMessageW(
+                        state->countdownEnabledCheckbox,
+                        BM_GETCHECK,
+                        0,
+                        0) == BST_CHECKED;
+                StartOrStopCountdown(*state, enabled, window);
+                return 0;
+            }
+            break;
+        case kCountdownHoursEditId:
+        case kCountdownMinutesEditId:
+        case kCountdownSecondsEditId:
+            if (HIWORD(wParam) == EN_KILLFOCUS) {
+                SaveCountdownDuration(*state, window);
+                return 0;
+            }
+            break;
+        case kCountdownPreviousButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RequestNextOrPrevious(*state, true);
+                return 0;
+            }
+            break;
+        case kCountdownNextButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RequestNextOrPrevious(*state, false);
+                return 0;
+            }
+            break;
+        case kCountdownStartStopButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                StartOrStopCountdown(
+                    *state, !state->settings.countdownEnabled, window);
+                return 0;
+            }
+            break;
+        case kCountdownPauseResumeButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                ToggleCountdownPause(*state);
+                return 0;
+            }
+            break;
+        case kCountdownRestartButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                if (state->settings.countdownEnabled) {
+                    ResetCountdown(*state);
+                }
+                return 0;
+            }
+            break;
         case kImageResizeToRadioId:
         case kImageAutoFitRadioId:
         case kSameImageOnDisplaysRadioId:
@@ -5225,6 +5838,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
     case WM_CLOSE:
         if (state) {
+            SaveCountdownDuration(*state, window, true);
             SaveSettingsWindowBoundsWithError(*state, window);
         }
         DestroyWindow(window);
@@ -5235,6 +5849,20 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->settingsWindow = nullptr;
             state->settingsTabs = nullptr;
             state->monitorPreviewPanel = nullptr;
+            state->countdownDisplay = nullptr;
+            state->countdownPreviousButton = nullptr;
+            state->countdownStartStopButton = nullptr;
+            state->countdownPauseResumeButton = nullptr;
+            state->countdownRestartButton = nullptr;
+            state->countdownNextButton = nullptr;
+            state->countdownEnabledCheckbox = nullptr;
+            state->countdownDurationGroup = nullptr;
+            state->countdownHoursEdit = nullptr;
+            state->countdownMinutesEdit = nullptr;
+            state->countdownSecondsEdit = nullptr;
+            state->countdownHoursLabel = nullptr;
+            state->countdownMinutesLabel = nullptr;
+            state->countdownSecondsLabel = nullptr;
             state->changeOnStartCheckbox = nullptr;
             state->openWindowOnStartCheckbox = nullptr;
             state->startWithWindowsCheckbox = nullptr;
@@ -5279,6 +5907,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             if (state->settingsFont) {
                 DeleteObject(state->settingsFont);
                 state->settingsFont = nullptr;
+            }
+            if (state->countdownFont) {
+                DeleteObject(state->countdownFont);
+                state->countdownFont = nullptr;
             }
         }
         break;
@@ -5395,7 +6027,10 @@ void CompleteWallpaperChange(ResidentState& state) {
             }
         }
     }
-    if (state.backgroundReapplyPending && !state.shuttingDown) {
+    if (state.timerNextPending && !state.shuttingDown) {
+        state.timerNextPending = false;
+        StartWallpaperChange(state);
+    } else if (state.backgroundReapplyPending && !state.shuttingDown) {
         state.backgroundReapplyPending = false;
         const bool reapplyMultiMonitorMode =
             state.multiMonitorModeReapplyPending;
@@ -5509,6 +6144,7 @@ void RequestResidentExit(ResidentState& state) {
     }
     state.changeRunning = false;
     if (state.settingsWindow) {
+        SaveCountdownDuration(state, state.settingsWindow, true);
         SaveSettingsWindowBoundsWithError(state, state.settingsWindow);
         DestroyWindow(state.settingsWindow);
     }
@@ -5549,10 +6185,10 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case kNextCommandId:
-            StartWallpaperChange(*state);
+            RequestNextOrPrevious(*state, false);
             return 0;
         case kPreviousCommandId:
-            StartWallpaperChange(*state, WallpaperRequest{true, {}, {}});
+            RequestNextOrPrevious(*state, true);
             return 0;
         case kSettingsCommandId:
             ShowSettingsWindow(*state);
@@ -5574,6 +6210,7 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
         if (wParam == kWorkerPollTimerId) {
             CompleteWallpaperChange(*state);
             ProcessPlaylistPackets(*state);
+            ProcessCountdownTick(*state);
             return 0;
         }
         break;
@@ -5607,6 +6244,13 @@ int RunResident(HINSTANCE instance) {
     state.instance = instance;
     state.settingsPath = settingsPath;
     state.settings = settings;
+    state.countdownRemainingSeconds =
+        swc::CountdownDurationSeconds(state.settings);
+    if (state.settings.countdownEnabled) {
+        state.countdownDeadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(state.countdownRemainingSeconds);
+    }
 
     INITCOMMONCONTROLSEX commonControls{};
     commonControls.dwSize = sizeof(commonControls);

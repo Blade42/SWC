@@ -177,6 +177,11 @@ int main() {
         assert(settings.largeImageMode == swc::LargeImageMode::fit);
         assert(settings.multiMonitorImageMode ==
             swc::MultiMonitorImageMode::separateImages);
+        assert(!settings.countdownEnabled);
+        assert(settings.countdownHours == 0);
+        assert(settings.countdownMinutes == 10);
+        assert(settings.countdownSeconds == 0);
+        assert(swc::CountdownDurationSeconds(settings) == 600);
     }
 
     {
@@ -201,6 +206,55 @@ int main() {
         std::wistringstream input(L"multi_monitor_image_mode=SePaRaTe_ImAgEs\n");
         assert(swc::ParseSettings(input).multiMonitorImageMode ==
             swc::MultiMonitorImageMode::separateImages);
+    }
+
+    {
+        std::wistringstream input(
+            L"countdown_enabled=TRUE\n"
+            L"countdown_hours=12\n"
+            L"countdown_minutes=34\n"
+            L"countdown_seconds=56\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.countdownEnabled);
+        assert(settings.countdownHours == 12);
+        assert(settings.countdownMinutes == 34);
+        assert(settings.countdownSeconds == 56);
+        assert(swc::CountdownDurationSeconds(settings) == 45296);
+    }
+
+    {
+        std::uint32_t seconds = 0;
+        assert(swc::ParseCountdownDuration(L"99", L"59", L"59", seconds));
+        assert(seconds == 359999);
+        assert(!swc::ParseCountdownDuration(L"100", L"0", L"0", seconds));
+        assert(!swc::ParseCountdownDuration(L"0", L"60", L"0", seconds));
+        assert(!swc::ParseCountdownDuration(L"0", L"0", L"60", seconds));
+        assert(!swc::ParseCountdownDuration(L"0", L"0", L"0", seconds));
+        assert(!swc::ParseCountdownDuration(L"1h", L"0", L"0", seconds));
+    }
+
+    {
+        std::wistringstream input(
+            L"countdown_enabled=true\n"
+            L"countdown_hours=100\n"
+            L"countdown_minutes=99\n"
+            L"countdown_seconds=0\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.countdownEnabled);
+        assert(settings.countdownHours == 0);
+        assert(settings.countdownMinutes == 10);
+        assert(settings.countdownSeconds == 0);
+    }
+
+    {
+        std::wistringstream input(
+            L"countdown_enabled=true\n"
+            L"countdown_hours=0\n"
+            L"countdown_minutes=0\n"
+            L"countdown_seconds=0\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(!settings.countdownEnabled);
+        assert(swc::CountdownDurationSeconds(settings) == 600);
     }
 
     {

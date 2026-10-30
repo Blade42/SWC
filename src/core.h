@@ -90,7 +90,16 @@ struct Settings {
     LargeImageMode largeImageMode = LargeImageMode::fit;
     MultiMonitorImageMode multiMonitorImageMode =
         MultiMonitorImageMode::separateImages;
+    bool countdownEnabled = false;
+    std::uint32_t countdownHours = 0;
+    std::uint32_t countdownMinutes = 10;
+    std::uint32_t countdownSeconds = 0;
 };
+
+inline std::uint32_t CountdownDurationSeconds(const Settings& settings) {
+    return settings.countdownHours * 3600 +
+        settings.countdownMinutes * 60 + settings.countdownSeconds;
+}
 
 inline bool HasEnabledSourceDirectory(
     const std::vector<SourceDirectory>& sourceDirectories) {
@@ -346,6 +355,29 @@ inline bool ParsePercent(
     return true;
 }
 
+inline bool ParseCountdownDuration(
+    const std::wstring& hours,
+    const std::wstring& minutes,
+    const std::wstring& seconds,
+    std::uint32_t& totalSeconds) {
+    std::uint32_t parsedHours = 0;
+    std::uint32_t parsedMinutes = 0;
+    std::uint32_t parsedSeconds = 0;
+    if (!ParsePercent(hours, 0, 99, parsedHours) ||
+        !ParsePercent(minutes, 0, 59, parsedMinutes) ||
+        !ParsePercent(seconds, 0, 59, parsedSeconds)) {
+        return false;
+    }
+
+    const std::uint32_t total =
+        parsedHours * 3600 + parsedMinutes * 60 + parsedSeconds;
+    if (total == 0) {
+        return false;
+    }
+    totalSeconds = total;
+    return true;
+}
+
 inline Settings ParseSettings(std::wistream& input) {
     Settings settings;
     std::wstring line;
@@ -500,7 +532,25 @@ inline Settings ParseSettings(std::wistream& input) {
             } else if (normalized == L"separate_images") {
                 settings.multiMonitorImageMode = MultiMonitorImageMode::separateImages;
             }
+        } else if (identifier == L"countdown_enabled") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            settings.countdownEnabled = normalized == L"true";
+        } else if (identifier == L"countdown_hours") {
+            ParsePercent(value, 0, 99, settings.countdownHours);
+        } else if (identifier == L"countdown_minutes") {
+            ParsePercent(value, 0, 59, settings.countdownMinutes);
+        } else if (identifier == L"countdown_seconds") {
+            ParsePercent(value, 0, 59, settings.countdownSeconds);
         }
+    }
+    if (CountdownDurationSeconds(settings) == 0) {
+        settings.countdownHours = 0;
+        settings.countdownMinutes = 10;
+        settings.countdownSeconds = 0;
+        settings.countdownEnabled = false;
     }
     return settings;
 }
