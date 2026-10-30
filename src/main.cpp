@@ -59,11 +59,19 @@ constexpr int kSourceDirectoryHintId = 2007;
 constexpr int kPlaylistListId = 2008;
 constexpr int kPlaylistHintId = 2009;
 constexpr int kMonitorPreviewPanelId = 2010;
+constexpr int kExitSettingsButtonId = 2011;
+constexpr int kOpenWindowOnStartCheckboxId = 2012;
 constexpr UINT kSetDisplayCommandBase = 40000;
 constexpr int kPlaylistThumbnailSize = 64;
 constexpr std::size_t kPlaylistThumbnailCacheLimit = 512;
 constexpr int kSettingsContentWidth = 968;
 constexpr int kMonitorPreviewGap = 12;
+constexpr int kSettingsMinimumClientWidth = 800;
+constexpr int kSettingsMinimumClientHeight = 640;
+constexpr DWORD kSettingsWindowStyle =
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN |
+    WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX;
+constexpr DWORD kSettingsWindowExtendedStyle = WS_EX_DLGMODALFRAME;
 constexpr wchar_t kMonitorPreviewPanelClass[] = L"SWCMonitorPreviewPanel";
 constexpr wchar_t kPlaylistDragGhostClass[] = L"SWCPlaylistDragGhost";
 constexpr int kPlaylistDragGhostWidth = 110;
@@ -506,6 +514,8 @@ struct MonitorPreview {
     double wallpaperAspectRatio = 0.0;
     UINT pixelWidth = 0;
     UINT pixelHeight = 0;
+    UINT pixelBufferWidth = 0;
+    UINT pixelBufferHeight = 0;
     RECT frameRect{};
     RECT labelRect{};
     std::wstring statusText;
@@ -1278,12 +1288,25 @@ void WriteSettingsFile(
         L"; Change wallpapers once when the program starts: true or false.\r\n";
     contents += L"change_on_start=" +
         std::wstring(settings.changeOnStart ? L"true" : L"false") + L"\r\n"
+        L"; Open the Settings window when the program starts: true or false.\r\n";
+    contents += L"open_window_on_start=" +
+        std::wstring(settings.openWindowOnStart ? L"true" : L"false") + L"\r\n"
+        L"; Settings window position and size (left,top,width,height); maintained automatically.\r\n";
+    if (settings.hasWindowBounds) {
+        contents += L"settings_window_bounds=" +
+            std::to_wstring(settings.windowBounds.x) + L"," +
+            std::to_wstring(settings.windowBounds.y) + L"," +
+            std::to_wstring(settings.windowBounds.width) + L"," +
+            std::to_wstring(settings.windowBounds.height) + L"\r\n";
+    }
+    contents +=
         L"; Example configuration:\r\n"
         L"; source_directories=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
         L"; source_directories=-D:\\SeasonalWallpapers\r\n"
         L"; last_image=0|C:\\Users\\Example\\Pictures\\Wallpapers\\wallpaper2.jpg\r\n"
         L"; display_image=\\\\?\\DISPLAY#ABC|C:\\Users\\Example\\Pictures\\Wallpapers\\wallpaper2.jpg\r\n"
-        L"; change_on_start=false\r\n";
+        L"; change_on_start=false\r\n"
+        L"; open_window_on_start=true\r\n";
     const std::filesystem::path temporary = path.wstring() + L".tmp";
     struct TemporarySettingsFile {
         const std::filesystem::path& path;
@@ -1332,6 +1355,17 @@ void UpdateUserSettings(
     auto settings = ReadSettingsFile(path);
     settings.sourceDirectories = preferences.sourceDirectories;
     settings.changeOnStart = preferences.changeOnStart;
+    settings.openWindowOnStart = preferences.openWindowOnStart;
+    WriteSettingsFile(path, settings);
+}
+
+void UpdateSettingsWindowBounds(
+    const std::filesystem::path& path,
+    const swc::WindowBounds& bounds) {
+    std::lock_guard<std::mutex> lock(gSettingsMutex);
+    auto settings = ReadSettingsFile(path);
+    settings.windowBounds = bounds;
+    settings.hasWindowBounds = true;
     WriteSettingsFile(path, settings);
 }
 
@@ -1636,6 +1670,9 @@ struct ResidentState {
     HWND settingsTabs = nullptr;
     HWND monitorPreviewPanel = nullptr;
     HWND changeOnStartCheckbox = nullptr;
+    HWND openWindowOnStartCheckbox = nullptr;
+    RECT settingsWindowNormalRect{};
+    bool hasSettingsWindowNormalRect = false;
     HWND sourceDirectoryList = nullptr;
     HWND sourceDirectoryHint = nullptr;
     HWND playlistList = nullptr;
@@ -1749,7 +1786,6 @@ void LayoutMonitorPreviews(ResidentState& state) {
             top + height + 4,
             left + width + 4,
             client.bottom - 2};
-        preview.pixels.clear();
         const int innerWidth = static_cast<int>(std::max<LONG>(
             0, preview.frameRect.right - preview.frameRect.left - 8));
         const int innerHeight = static_cast<int>(std::max<LONG>(
@@ -1824,9 +1860,17 @@ void RefreshMonitorPreviews(ResidentState& state) {
                 preview.wallpaperPath,
                 preview.pixelWidth,
                 preview.pixelHeight);
+            preview.pixelBufferWidth = preview.pixelWidth;
+            preview.pixelBufferHeight = preview.pixelHeight;
         } catch (const Failure&) {
+            preview.pixels.clear();
+            preview.pixelBufferWidth = 0;
+            preview.pixelBufferHeight = 0;
             preview.statusText = L"Preview unavailable";
         } catch (const std::exception&) {
+            preview.pixels.clear();
+            preview.pixelBufferWidth = 0;
+            preview.pixelBufferHeight = 0;
             preview.statusText = L"Preview unavailable";
         }
     }
@@ -1859,7 +1903,8 @@ void DrawMonitorPreviews(const DRAWITEMSTRUCT& draw, ResidentState& state) {
             frame.right - 4,
             frame.bottom - 4};
         if (!preview.pixels.empty() &&
-            preview.pixelWidth > 0 && preview.pixelHeight > 0) {
+            preview.pixelWidth > 0 && preview.pixelHeight > 0 &&
+            preview.pixelBufferWidth > 0 && preview.pixelBufferHeight > 0) {
             const int screenCenterX = (screen.left + screen.right) / 2;
             const int screenCenterY = (screen.top + screen.bottom) / 2;
             screen.left = screenCenterX -
@@ -1876,11 +1921,14 @@ void DrawMonitorPreviews(const DRAWITEMSTRUCT& draw, ResidentState& state) {
         }
         if (!preview.pixels.empty() &&
             preview.pixelWidth > 0 && preview.pixelHeight > 0 &&
+            preview.pixelBufferWidth > 0 && preview.pixelBufferHeight > 0 &&
             screen.right > screen.left && screen.bottom > screen.top) {
             BITMAPINFO bitmapInfo{};
             bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
-            bitmapInfo.bmiHeader.biWidth = static_cast<LONG>(preview.pixelWidth);
-            bitmapInfo.bmiHeader.biHeight = -static_cast<LONG>(preview.pixelHeight);
+            bitmapInfo.bmiHeader.biWidth =
+                static_cast<LONG>(preview.pixelBufferWidth);
+            bitmapInfo.bmiHeader.biHeight =
+                -static_cast<LONG>(preview.pixelBufferHeight);
             bitmapInfo.bmiHeader.biPlanes = 1;
             bitmapInfo.bmiHeader.biBitCount = 32;
             bitmapInfo.bmiHeader.biCompression = BI_RGB;
@@ -1892,8 +1940,8 @@ void DrawMonitorPreviews(const DRAWITEMSTRUCT& draw, ResidentState& state) {
                 screen.bottom - screen.top,
                 0,
                 0,
-                preview.pixelWidth,
-                preview.pixelHeight,
+                preview.pixelBufferWidth,
+                preview.pixelBufferHeight,
                 preview.pixels.data(),
                 &bitmapInfo,
                 DIB_RGB_COLORS,
@@ -2759,11 +2807,178 @@ HWND CreateSettingsControl(
     return control;
 }
 
+void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeight) {
+    if (!state.settingsTabs) {
+        return;
+    }
+
+    const auto moveControl = [](HWND control, int x, int y, int width, int height) {
+        if (control) {
+            SetWindowPos(
+                control,
+                nullptr,
+                x,
+                y,
+                std::max(1, width),
+                std::max(1, height),
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    };
+
+    const int contentWidth = std::max(1, clientWidth - 24);
+    const int footerY = std::max(0, clientHeight - 44);
+    const int tabsY = 145;
+    moveControl(state.monitorPreviewPanel, 12, 12, contentWidth, 125);
+    moveControl(
+        state.settingsTabs,
+        12,
+        tabsY,
+        contentWidth,
+        std::max(1, footerY - 12 - tabsY));
+    moveControl(
+        state.sourceDirectoryList,
+        28,
+        186,
+        clientWidth - 56,
+        clientHeight - 171 - 14 - 186);
+    moveControl(
+        GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
+        28,
+        clientHeight - 171,
+        130,
+        32);
+    moveControl(
+        GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId),
+        172,
+        clientHeight - 171,
+        110,
+        32);
+    moveControl(
+        state.sourceDirectoryHint,
+        28,
+        clientHeight - 129,
+        clientWidth - 56,
+        36);
+    moveControl(
+        state.playlistList,
+        28,
+        186,
+        clientWidth - 56,
+        clientHeight - 295);
+    moveControl(
+        state.playlistHint,
+        28,
+        clientHeight - 99,
+        clientWidth - 56,
+        28);
+    moveControl(
+        GetDlgItem(state.settingsWindow, kExitSettingsButtonId),
+        clientWidth - 28 - 82 - 10 - 82,
+        footerY,
+        82,
+        32);
+    moveControl(
+        GetDlgItem(state.settingsWindow, kCloseSettingsButtonId),
+        clientWidth - 28 - 82,
+        footerY,
+        82,
+        32);
+
+    if (state.sourceDirectoryList) {
+        ListView_SetColumnWidth(
+            state.sourceDirectoryList, 0, std::max(100, clientWidth - 80));
+    }
+    if (state.playlistList) {
+        ListView_SetColumnWidth(
+            state.playlistList,
+            0,
+            std::max(270, clientWidth - 56 - 670 - 24));
+    }
+}
+
+void RecordNormalSettingsWindowRect(ResidentState& state, HWND window) {
+    if (!IsIconic(window) && !IsZoomed(window)) {
+        RECT bounds{};
+        if (GetWindowRect(window, &bounds)) {
+            state.settingsWindowNormalRect = bounds;
+            state.hasSettingsWindowNormalRect = true;
+        }
+    }
+}
+
+void SaveSettingsWindowBounds(ResidentState& state, HWND window) {
+    RecordNormalSettingsWindowRect(state, window);
+    if (!state.hasSettingsWindowNormalRect) {
+        return;
+    }
+
+    const RECT& rect = state.settingsWindowNormalRect;
+    const swc::WindowBounds bounds{
+        rect.left,
+        rect.top,
+        rect.right - rect.left,
+        rect.bottom - rect.top};
+    UpdateSettingsWindowBounds(state.settingsPath, bounds);
+    state.settings.windowBounds = bounds;
+    state.settings.hasWindowBounds = true;
+}
+
+void SaveSettingsWindowBoundsWithError(ResidentState& state, HWND window) {
+    try {
+        SaveSettingsWindowBounds(state, window);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, window);
+    } catch (const std::exception&) {
+        ShowError(L"Could not save the Settings window position and size.", window);
+    }
+}
+
+bool IsSettingsWindowBoundsUsable(const swc::WindowBounds& bounds) {
+    if (bounds.width < kSettingsMinimumClientWidth ||
+        bounds.height < kSettingsMinimumClientHeight) {
+        return false;
+    }
+
+    const long long right = static_cast<long long>(bounds.x) + bounds.width;
+    const long long bottom = static_cast<long long>(bounds.y) + bounds.height;
+    if (right > std::numeric_limits<LONG>::max() ||
+        bottom > std::numeric_limits<LONG>::max() ||
+        right < std::numeric_limits<LONG>::min() ||
+        bottom < std::numeric_limits<LONG>::min()) {
+        return false;
+    }
+    const RECT rect{
+        bounds.x,
+        bounds.y,
+        static_cast<LONG>(right),
+        static_cast<LONG>(bottom)};
+    const HMONITOR monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL);
+    if (!monitor) {
+        return false;
+    }
+
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return false;
+    }
+    const LONG visibleWidth = std::max<LONG>(
+        0,
+        std::min(rect.right, info.rcWork.right) -
+            std::max(rect.left, info.rcWork.left));
+    const LONG visibleHeight = std::max<LONG>(
+        0,
+        std::min(rect.bottom, info.rcWork.bottom) -
+            std::max(rect.top, info.rcWork.top));
+    return visibleWidth >= 100 && visibleHeight >= 100;
+}
+
 void ShowSettingsPage(ResidentState& state) {
     const int page = TabCtrl_GetCurSel(state.settingsTabs);
     const bool startupPage = page == 0;
     const bool sourcesPage = page == 1;
     ShowWindow(state.changeOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.openWindowOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.sourceDirectoryList, sourcesPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.sourceDirectoryHint, sourcesPage ? SW_SHOW : SW_HIDE);
     ShowWindow(GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
@@ -3134,6 +3349,16 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 BM_SETCHECK,
                 state->settings.changeOnStart ? BST_CHECKED : BST_UNCHECKED,
                 0);
+            state->openWindowOnStartCheckbox = CreateSettingsControl(
+                0, L"BUTTON", L"Open window on startup",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                30, 219, 900, 28, window, kOpenWindowOnStartCheckboxId, state->instance,
+                state->settingsFont);
+            SendMessageW(
+                state->openWindowOnStartCheckbox,
+                BM_SETCHECK,
+                state->settings.openWindowOnStart ? BST_CHECKED : BST_UNCHECKED,
+                0);
 
             state->sourceDirectoryList = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -3224,10 +3449,21 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                 914, 726, 82, 32, window, kCloseSettingsButtonId, state->instance,
                 state->settingsFont);
+            CreateSettingsControl(
+                0, L"BUTTON", L"Exit",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                822, 726, 82, 32, window, kExitSettingsButtonId, state->instance,
+                state->settingsFont);
 
             RefreshSourceDirectoryList(*state);
             DragAcceptFiles(window, TRUE);
             ShowSettingsPage(*state);
+            RECT client{};
+            if (GetClientRect(window, &client)) {
+                LayoutSettingsWindow(
+                    *state, client.right - client.left, client.bottom - client.top);
+            }
+            RecordNormalSettingsWindowRect(*state, window);
         } catch (const Failure& failure) {
             state->settingsWindowError = failure.message;
             return -1;
@@ -3237,6 +3473,44 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         }
         return 0;
     }
+    case WM_GETMINMAXINFO: {
+        auto* limits = reinterpret_cast<MINMAXINFO*>(lParam);
+        RECT minimum{
+            0, 0, kSettingsMinimumClientWidth, kSettingsMinimumClientHeight};
+        if (AdjustWindowRectEx(
+                &minimum,
+                kSettingsWindowStyle,
+                FALSE,
+                kSettingsWindowExtendedStyle)) {
+            limits->ptMinTrackSize.x = minimum.right - minimum.left;
+            limits->ptMinTrackSize.y = minimum.bottom - minimum.top;
+        } else {
+            ShowError(
+                L"Could not determine the Settings window minimum size.",
+                window);
+            limits->ptMinTrackSize.x = kSettingsMinimumClientWidth + 100;
+            limits->ptMinTrackSize.y = kSettingsMinimumClientHeight + 100;
+        }
+        return 0;
+    }
+    case WM_SIZE:
+        if (state && wParam != SIZE_MINIMIZED) {
+            LayoutSettingsWindow(
+                *state, static_cast<int>(LOWORD(lParam)),
+                static_cast<int>(HIWORD(lParam)));
+            RecordNormalSettingsWindowRect(*state, window);
+            RedrawWindow(
+                window,
+                nullptr,
+                nullptr,
+                RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+        }
+        return 0;
+    case WM_MOVE:
+        if (state) {
+            RecordNormalSettingsWindowRect(*state, window);
+        }
+        break;
     case WM_NOTIFY:
         if (state) {
             const auto* notification = reinterpret_cast<const NMHDR*>(lParam);
@@ -3393,25 +3667,44 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         }
         switch (LOWORD(wParam)) {
         case kChangeOnStartCheckboxId:
+        case kOpenWindowOnStartCheckboxId:
             if (HIWORD(wParam) == BN_CLICKED) {
+                const bool openWindowSetting =
+                    LOWORD(wParam) == kOpenWindowOnStartCheckboxId;
+                const HWND checkbox = openWindowSetting
+                    ? state->openWindowOnStartCheckbox
+                    : state->changeOnStartCheckbox;
                 auto updated = state->settings;
-                updated.changeOnStart =
-                    SendMessageW(state->changeOnStartCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                const bool checked =
+                    SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (openWindowSetting) {
+                    updated.openWindowOnStart = checked;
+                } else {
+                    updated.changeOnStart = checked;
+                }
                 try {
                     UpdateUserSettings(state->settingsPath, updated);
                     state->settings = std::move(updated);
                 } catch (const Failure& failure) {
                     SendMessageW(
-                        state->changeOnStartCheckbox,
+                        checkbox,
                         BM_SETCHECK,
-                        state->settings.changeOnStart ? BST_CHECKED : BST_UNCHECKED,
+                        (openWindowSetting
+                            ? state->settings.openWindowOnStart
+                            : state->settings.changeOnStart)
+                            ? BST_CHECKED
+                            : BST_UNCHECKED,
                         0);
                     ShowError(failure.message, window);
                 } catch (const std::exception&) {
                     SendMessageW(
-                        state->changeOnStartCheckbox,
+                        checkbox,
                         BM_SETCHECK,
-                        state->settings.changeOnStart ? BST_CHECKED : BST_UNCHECKED,
+                        (openWindowSetting
+                            ? state->settings.openWindowOnStart
+                            : state->settings.changeOnStart)
+                            ? BST_CHECKED
+                            : BST_UNCHECKED,
                         0);
                     ShowError(L"Could not save the Startup setting.", window);
                 }
@@ -3464,6 +3757,18 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         case kCloseSettingsButtonId:
             if (HIWORD(wParam) == BN_CLICKED) {
                 SendMessageW(window, WM_CLOSE, 0, 0);
+                return 0;
+            }
+            break;
+        case kExitSettingsButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                if (!PostMessageW(
+                        state->window,
+                        WM_COMMAND,
+                        MAKEWPARAM(kExitCommandId, 0),
+                        0)) {
+                    ShowError(L"Could not dispatch the Exit command.", window);
+                }
                 return 0;
             }
             break;
@@ -3605,6 +3910,9 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             }
             break;
     case WM_CLOSE:
+        if (state) {
+            SaveSettingsWindowBoundsWithError(*state, window);
+        }
         DestroyWindow(window);
         return 0;
     case WM_NCDESTROY:
@@ -3614,6 +3922,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->settingsTabs = nullptr;
             state->monitorPreviewPanel = nullptr;
             state->changeOnStartCheckbox = nullptr;
+            state->openWindowOnStartCheckbox = nullptr;
             state->sourceDirectoryList = nullptr;
             state->sourceDirectoryHint = nullptr;
             state->playlistList = nullptr;
@@ -3648,15 +3957,26 @@ void ShowSettingsWindow(ResidentState& state) {
     }
 
     state.settingsWindowError.clear();
+    int x = CW_USEDEFAULT;
+    int y = CW_USEDEFAULT;
+    int width = 1040;
+    int height = 800;
+    if (state.settings.hasWindowBounds &&
+        IsSettingsWindowBoundsUsable(state.settings.windowBounds)) {
+        x = state.settings.windowBounds.x;
+        y = state.settings.windowBounds.y;
+        width = state.settings.windowBounds.width;
+        height = state.settings.windowBounds.height;
+    }
     HWND window = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
+        kSettingsWindowExtendedStyle,
         kSettingsWindowClass,
         L"Settings - Simple Wallpaper Changer",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN,
-        CW_USEDEFAULT,
-        CW_USEDEFAULT,
-        1040,
-        800,
+        kSettingsWindowStyle,
+        x,
+        y,
+        width,
+        height,
         state.window,
         nullptr,
         state.instance,
@@ -3839,6 +4159,7 @@ void RequestResidentExit(ResidentState& state) {
     }
     state.changeRunning = false;
     if (state.settingsWindow) {
+        SaveSettingsWindowBoundsWithError(state, state.settingsWindow);
         DestroyWindow(state.settingsWindow);
     }
     RemoveTrayIcon(state);
@@ -4012,6 +4333,9 @@ int RunResident(HINSTANCE instance) {
 
     if (settings.changeOnStart) {
         StartWallpaperChange(state);
+    }
+    if (settings.openWindowOnStart) {
+        ShowSettingsWindow(state);
     }
 
     MSG message{};

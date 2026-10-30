@@ -31,11 +31,21 @@ struct DisplayImage {
     std::wstring imagePath;
 };
 
+struct WindowBounds {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
 struct Settings {
     std::vector<SourceDirectory> sourceDirectories;
     std::vector<DisplayImage> displayImages;
     std::wstring lastImage;
     bool changeOnStart = true;
+    bool openWindowOnStart = false;
+    WindowBounds windowBounds;
+    bool hasWindowBounds = false;
 };
 
 inline bool HasEnabledSourceDirectory(
@@ -221,6 +231,31 @@ inline Settings ParseSettings(std::wistream& input) {
                 return static_cast<wchar_t>(std::towlower(ch));
             });
             settings.changeOnStart = normalized == L"false" ? false : true;
+        } else if (identifier == L"open_window_on_start") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            settings.openWindowOnStart = normalized == L"true";
+        } else if (identifier == L"settings_window_bounds") {
+            std::wistringstream bounds(value);
+            wchar_t separator = 0;
+            WindowBounds parsed;
+            const bool parsedBounds =
+                static_cast<bool>(bounds >> parsed.x >> separator) &&
+                separator == L',' &&
+                static_cast<bool>(bounds >> parsed.y >> separator) &&
+                separator == L',' &&
+                static_cast<bool>(bounds >> parsed.width >> separator) &&
+                separator == L',' &&
+                static_cast<bool>(bounds >> parsed.height);
+            bounds >> std::ws;
+            if (parsedBounds &&
+                bounds.peek() == std::char_traits<wchar_t>::eof() &&
+                parsed.width > 0 && parsed.height > 0) {
+                settings.windowBounds = parsed;
+                settings.hasWindowBounds = true;
+            }
         }
     }
     return settings;

@@ -78,6 +78,49 @@ int main() {
         assert(swc::ParseSettings(input).changeOnStart);
     }
 
+    {
+        std::wistringstream input(L"");
+        assert(!swc::ParseSettings(input).openWindowOnStart);
+    }
+
+    {
+        std::wistringstream input(L"open_window_on_start=TrUe\n");
+        assert(swc::ParseSettings(input).openWindowOnStart);
+    }
+
+    {
+        std::wistringstream input(L"open_window_on_start=FALSE\n");
+        assert(!swc::ParseSettings(input).openWindowOnStart);
+    }
+
+    {
+        std::wistringstream input(L"open_window_on_start=invalid\n");
+        assert(!swc::ParseSettings(input).openWindowOnStart);
+    }
+
+    {
+        std::wistringstream input(L"");
+        const auto settings = swc::ParseSettings(input);
+        assert(!settings.hasWindowBounds);
+    }
+
+    {
+        std::wistringstream input(L"settings_window_bounds=-1920,40,1200,900\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.hasWindowBounds);
+        assert(settings.windowBounds.x == -1920);
+        assert(settings.windowBounds.y == 40);
+        assert(settings.windowBounds.width == 1200);
+        assert(settings.windowBounds.height == 900);
+    }
+
+    {
+        std::wistringstream input(
+            L"settings_window_bounds=10,20,0,800\n"
+            L"settings_window_bounds=10,20,800\n");
+        assert(!swc::ParseSettings(input).hasWindowBounds);
+    }
+
     assert(swc::IsSupportedExtension(L".JPG"));
     assert(swc::IsSupportedExtension(L".jpeg"));
     assert(swc::IsSupportedExtension(L".Png"));
