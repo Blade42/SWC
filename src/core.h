@@ -31,11 +31,34 @@ struct DisplayImage {
     std::wstring imagePath;
 };
 
+struct WindowBounds {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
+struct RgbColor {
+    std::uint8_t red;
+    std::uint8_t green;
+    std::uint8_t blue;
+};
+
+enum class BackgroundFillMode {
+    fillColor,
+    adaptiveToImage
+};
+
 struct Settings {
     std::vector<SourceDirectory> sourceDirectories;
     std::vector<DisplayImage> displayImages;
     std::wstring lastImage;
     bool changeOnStart = true;
+    bool openWindowOnStart = false;
+    WindowBounds windowBounds;
+    bool hasWindowBounds = false;
+    BackgroundFillMode backgroundFillMode = BackgroundFillMode::adaptiveToImage;
+    RgbColor backgroundFillColor{};
 };
 
 inline bool HasEnabledSourceDirectory(
@@ -72,12 +95,6 @@ struct ColorSample {
     std::uint8_t green;
     std::uint8_t blue;
     std::uint8_t alpha;
-};
-
-struct RgbColor {
-    std::uint8_t red;
-    std::uint8_t green;
-    std::uint8_t blue;
 };
 
 inline RgbColor EstimateBackgroundColor(
@@ -221,6 +238,65 @@ inline Settings ParseSettings(std::wistream& input) {
                 return static_cast<wchar_t>(std::towlower(ch));
             });
             settings.changeOnStart = normalized == L"false" ? false : true;
+        } else if (identifier == L"open_window_on_start") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            settings.openWindowOnStart = normalized == L"true";
+        } else if (identifier == L"settings_window_bounds") {
+            std::wistringstream bounds(value);
+            wchar_t separator = 0;
+            WindowBounds parsed;
+            const bool parsedBounds =
+                static_cast<bool>(bounds >> parsed.x >> separator) &&
+                separator == L',' &&
+                static_cast<bool>(bounds >> parsed.y >> separator) &&
+                separator == L',' &&
+                static_cast<bool>(bounds >> parsed.width >> separator) &&
+                separator == L',' &&
+                static_cast<bool>(bounds >> parsed.height);
+            bounds >> std::ws;
+            if (parsedBounds &&
+                bounds.peek() == std::char_traits<wchar_t>::eof() &&
+                parsed.width > 0 && parsed.height > 0) {
+                settings.windowBounds = parsed;
+                settings.hasWindowBounds = true;
+            }
+        } else if (identifier == L"background_fill") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            if (normalized == L"fill_color") {
+                settings.backgroundFillMode = BackgroundFillMode::fillColor;
+            } else if (normalized == L"adaptive") {
+                settings.backgroundFillMode = BackgroundFillMode::adaptiveToImage;
+            }
+        } else if (identifier == L"background_color") {
+            if (value.size() == 6) {
+                unsigned int rgb = 0;
+                bool valid = true;
+                for (const wchar_t digit : value) {
+                    rgb <<= 4;
+                    if (digit >= L'0' && digit <= L'9') {
+                        rgb |= static_cast<unsigned int>(digit - L'0');
+                    } else if (digit >= L'a' && digit <= L'f') {
+                        rgb |= static_cast<unsigned int>(digit - L'a' + 10);
+                    } else if (digit >= L'A' && digit <= L'F') {
+                        rgb |= static_cast<unsigned int>(digit - L'A' + 10);
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+                if (valid) {
+                    settings.backgroundFillColor = {
+                        static_cast<std::uint8_t>((rgb >> 16) & 0xFF),
+                        static_cast<std::uint8_t>((rgb >> 8) & 0xFF),
+                        static_cast<std::uint8_t>(rgb & 0xFF)};
+                }
+            }
         }
     }
     return settings;
