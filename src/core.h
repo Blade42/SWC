@@ -6,6 +6,7 @@
 #include <cwctype>
 #include <iomanip>
 #include <istream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -49,6 +50,23 @@ enum class BackgroundFillMode {
     adaptiveToImage
 };
 
+enum class ImageSizingMode {
+    resizeTo,
+    autoFit
+};
+
+enum class SmallImageMode {
+    centered,
+    tile,
+    fit
+};
+
+enum class LargeImageMode {
+    centered,
+    fill,
+    fit
+};
+
 struct Settings {
     std::vector<SourceDirectory> sourceDirectories;
     std::vector<DisplayImage> displayImages;
@@ -59,6 +77,11 @@ struct Settings {
     bool hasWindowBounds = false;
     BackgroundFillMode backgroundFillMode = BackgroundFillMode::adaptiveToImage;
     RgbColor backgroundFillColor{};
+    ImageSizingMode imageSizingMode = ImageSizingMode::autoFit;
+    std::uint32_t resizeToPercent = 90;
+    SmallImageMode smallImageMode = SmallImageMode::fit;
+    std::uint32_t maxSmallImageEnlargePercent = 400;
+    LargeImageMode largeImageMode = LargeImageMode::fit;
 };
 
 inline bool HasEnabledSourceDirectory(
@@ -89,6 +112,104 @@ struct FitRect {
     std::uint32_t width;
     std::uint32_t height;
 };
+
+struct ImagePlacement {
+    std::int64_t left;
+    std::int64_t top;
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t tileColumns = 1;
+    std::uint32_t tileRows = 1;
+};
+
+inline std::uint32_t ScaleImageDimension(
+    std::uint32_t dimension,
+    long double scale) {
+    const long double scaled = static_cast<long double>(dimension) * scale;
+    return static_cast<std::uint32_t>(std::min<long double>(
+        std::numeric_limits<std::uint32_t>::max(),
+        std::max<long double>(1, scaled + 0.5L)));
+}
+
+inline ImagePlacement CalculateImagePlacement(
+    std::uint32_t sourceWidth,
+    std::uint32_t sourceHeight,
+    std::uint32_t outputWidth,
+    std::uint32_t outputHeight,
+    const Settings& settings) {
+    if (sourceWidth == 0 || sourceHeight == 0 ||
+        outputWidth == 0 || outputHeight == 0) {
+        return {};
+    }
+
+    const bool fitsWithinDisplay =
+        sourceWidth <= outputWidth && sourceHeight <= outputHeight;
+    long double scale = 1.0L;
+    if (settings.imageSizingMode == ImageSizingMode::resizeTo) {
+        const std::uint64_t widthGap = sourceWidth > outputWidth
+            ? static_cast<std::uint64_t>(sourceWidth) - outputWidth
+            : static_cast<std::uint64_t>(outputWidth) - sourceWidth;
+        const std::uint64_t heightGap = sourceHeight > outputHeight
+            ? static_cast<std::uint64_t>(sourceHeight) - outputHeight
+            : static_cast<std::uint64_t>(outputHeight) - sourceHeight;
+        if (widthGap <= heightGap) {
+            scale = static_cast<long double>(outputWidth) *
+                settings.resizeToPercent / (100.0L * sourceWidth);
+        } else {
+            scale = static_cast<long double>(outputHeight) *
+                settings.resizeToPercent / (100.0L * sourceHeight);
+        }
+    } else if (fitsWithinDisplay &&
+        settings.smallImageMode == SmallImageMode::centered) {
+        scale = 1.0L;
+    } else if (fitsWithinDisplay &&
+        settings.smallImageMode == SmallImageMode::tile) {
+        const std::uint32_t columns = std::max<std::uint32_t>(
+            1, outputWidth / sourceWidth);
+        const std::uint32_t rows = std::max<std::uint32_t>(
+            1, outputHeight / sourceHeight);
+        if (columns > 1 || rows > 1) {
+            const auto tiledWidth =
+                static_cast<std::uint64_t>(sourceWidth) * columns;
+            const auto tiledHeight =
+                static_cast<std::uint64_t>(sourceHeight) * rows;
+            return {
+                (static_cast<std::int64_t>(outputWidth) -
+                    static_cast<std::int64_t>(tiledWidth)) / 2,
+                (static_cast<std::int64_t>(outputHeight) -
+                    static_cast<std::int64_t>(tiledHeight)) / 2,
+                sourceWidth,
+                sourceHeight,
+                columns,
+                rows};
+        }
+    } else if (fitsWithinDisplay) {
+        const long double fitScale = std::min(
+            static_cast<long double>(outputWidth) / sourceWidth,
+            static_cast<long double>(outputHeight) / sourceHeight);
+        scale = std::min(
+            fitScale,
+            static_cast<long double>(settings.maxSmallImageEnlargePercent) / 100.0L);
+    } else if (settings.largeImageMode == LargeImageMode::centered) {
+        scale = 1.0L;
+    } else if (settings.largeImageMode == LargeImageMode::fill) {
+        scale = std::max(
+            static_cast<long double>(outputWidth) / sourceWidth,
+            static_cast<long double>(outputHeight) / sourceHeight);
+    } else {
+        scale = std::min(
+            static_cast<long double>(outputWidth) / sourceWidth,
+            static_cast<long double>(outputHeight) / sourceHeight);
+    }
+
+    const std::uint32_t width = ScaleImageDimension(sourceWidth, scale);
+    const std::uint32_t height = ScaleImageDimension(sourceHeight, scale);
+    return {
+        (static_cast<std::int64_t>(outputWidth) - width) / 2,
+        (static_cast<std::int64_t>(outputHeight) - height) / 2,
+        width,
+        height};
+}
 
 struct ColorSample {
     std::uint8_t red;
@@ -198,6 +319,25 @@ inline std::wstring Trim(std::wstring value) {
     return std::wstring(first, last);
 }
 
+inline bool ParsePercent(
+    const std::wstring& value,
+    std::uint32_t minimum,
+    std::uint32_t maximum,
+    std::uint32_t& result) {
+    std::wistringstream input(value);
+    std::uint32_t parsed = 0;
+    if (!(input >> parsed)) {
+        return false;
+    }
+    input >> std::ws;
+    if (input.peek() != std::char_traits<wchar_t>::eof() ||
+        parsed < minimum || parsed > maximum) {
+        return false;
+    }
+    result = parsed;
+    return true;
+}
+
 inline Settings ParseSettings(std::wistream& input) {
     Settings settings;
     std::wstring line;
@@ -296,6 +436,45 @@ inline Settings ParseSettings(std::wistream& input) {
                         static_cast<std::uint8_t>((rgb >> 8) & 0xFF),
                         static_cast<std::uint8_t>(rgb & 0xFF)};
                 }
+            }
+        } else if (identifier == L"image_sizing") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            if (normalized == L"resize_to") {
+                settings.imageSizingMode = ImageSizingMode::resizeTo;
+            } else if (normalized == L"autofit") {
+                settings.imageSizingMode = ImageSizingMode::autoFit;
+            }
+        } else if (identifier == L"resize_to_percent") {
+            ParsePercent(value, 1, 1000, settings.resizeToPercent);
+        } else if (identifier == L"autofit_small") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            if (normalized == L"centered") {
+                settings.smallImageMode = SmallImageMode::centered;
+            } else if (normalized == L"tile") {
+                settings.smallImageMode = SmallImageMode::tile;
+            } else if (normalized == L"fit") {
+                settings.smallImageMode = SmallImageMode::fit;
+            }
+        } else if (identifier == L"autofit_max_enlarge_percent") {
+            ParsePercent(
+                value, 100, 1000, settings.maxSmallImageEnlargePercent);
+        } else if (identifier == L"autofit_large") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            if (normalized == L"centered") {
+                settings.largeImageMode = LargeImageMode::centered;
+            } else if (normalized == L"fill") {
+                settings.largeImageMode = LargeImageMode::fill;
+            } else if (normalized == L"fit") {
+                settings.largeImageMode = LargeImageMode::fit;
             }
         }
     }

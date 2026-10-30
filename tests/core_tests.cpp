@@ -152,6 +152,46 @@ int main() {
         assert(settings.backgroundFillColor.blue == 0);
     }
 
+    {
+        std::wistringstream input(L"");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.imageSizingMode == swc::ImageSizingMode::autoFit);
+        assert(settings.resizeToPercent == 90);
+        assert(settings.smallImageMode == swc::SmallImageMode::fit);
+        assert(settings.maxSmallImageEnlargePercent == 400);
+        assert(settings.largeImageMode == swc::LargeImageMode::fit);
+    }
+
+    {
+        std::wistringstream input(
+            L"image_sizing=RESIZE_TO\n"
+            L"resize_to_percent=125\n"
+            L"autofit_small=tile\n"
+            L"autofit_max_enlarge_percent=250\n"
+            L"autofit_large=fill\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.imageSizingMode == swc::ImageSizingMode::resizeTo);
+        assert(settings.resizeToPercent == 125);
+        assert(settings.smallImageMode == swc::SmallImageMode::tile);
+        assert(settings.maxSmallImageEnlargePercent == 250);
+        assert(settings.largeImageMode == swc::LargeImageMode::fill);
+    }
+
+    {
+        std::wistringstream input(
+            L"resize_to_percent=0\n"
+            L"resize_to_percent=1001\n"
+            L"autofit_max_enlarge_percent=99\n"
+            L"autofit_max_enlarge_percent=1001\n"
+            L"autofit_small=invalid\n"
+            L"autofit_large=invalid\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.resizeToPercent == 90);
+        assert(settings.maxSmallImageEnlargePercent == 400);
+        assert(settings.smallImageMode == swc::SmallImageMode::fit);
+        assert(settings.largeImageMode == swc::LargeImageMode::fit);
+    }
+
     assert(swc::IsSupportedExtension(L".JPG"));
     assert(swc::IsSupportedExtension(L".jpeg"));
     assert(swc::IsSupportedExtension(L".Png"));
@@ -200,6 +240,85 @@ int main() {
     assert(portrait.width == 810);
     assert(portrait.height == 1080);
     assert(swc::CalculateFitRect(0, 10, 10, 10).width == 0);
+
+    {
+        const swc::Settings settings;
+        const auto placement =
+            swc::CalculateImagePlacement(800, 600, 1920, 1080, settings);
+        assert(placement.left == 240 && placement.top == 0);
+        assert(placement.width == 1440 && placement.height == 1080);
+    }
+
+    {
+        swc::Settings settings;
+        settings.imageSizingMode = swc::ImageSizingMode::resizeTo;
+        const auto placement =
+            swc::CalculateImagePlacement(50, 40, 100, 100, settings);
+        assert(placement.left == 5 && placement.top == 14);
+        assert(placement.width == 90 && placement.height == 72);
+    }
+
+    {
+        swc::Settings settings;
+        settings.imageSizingMode = swc::ImageSizingMode::resizeTo;
+        settings.resizeToPercent = 90;
+        const auto placement =
+            swc::CalculateImagePlacement(200, 100, 100, 100, settings);
+        assert(placement.left == -40 && placement.top == 5);
+        assert(placement.width == 180 && placement.height == 90);
+    }
+
+    {
+        swc::Settings settings;
+        settings.smallImageMode = swc::SmallImageMode::centered;
+        auto placement = swc::CalculateImagePlacement(50, 40, 100, 100, settings);
+        assert(placement.left == 25 && placement.top == 30);
+        assert(placement.width == 50 && placement.height == 40);
+
+        settings.smallImageMode = swc::SmallImageMode::tile;
+        placement = swc::CalculateImagePlacement(30, 30, 100, 100, settings);
+        assert(placement.left == 5 && placement.top == 5);
+        assert(placement.tileColumns == 3 && placement.tileRows == 3);
+
+        placement = swc::CalculateImagePlacement(90, 100, 100, 100, settings);
+        assert(placement.left == 5 && placement.top == 0);
+        assert(placement.tileColumns == 1 && placement.tileRows == 1);
+    }
+
+    {
+        swc::Settings settings;
+        settings.smallImageMode = swc::SmallImageMode::fit;
+        settings.maxSmallImageEnlargePercent = 150;
+        auto placement = swc::CalculateImagePlacement(50, 40, 100, 100, settings);
+        assert(placement.left == 12 && placement.top == 20);
+        assert(placement.width == 75 && placement.height == 60);
+
+        settings.maxSmallImageEnlargePercent = 400;
+        placement = swc::CalculateImagePlacement(50, 40, 100, 100, settings);
+        assert(placement.width == 100 && placement.height == 80);
+    }
+
+    {
+        swc::Settings settings;
+        settings.largeImageMode = swc::LargeImageMode::centered;
+        auto placement = swc::CalculateImagePlacement(200, 100, 100, 100, settings);
+        assert(placement.left == -50 && placement.top == 0);
+        assert(placement.width == 200 && placement.height == 100);
+
+        placement = swc::CalculateImagePlacement(120, 80, 100, 100, settings);
+        assert(placement.left == -10 && placement.top == 10);
+        assert(placement.width == 120 && placement.height == 80);
+
+        settings.largeImageMode = swc::LargeImageMode::fill;
+        placement = swc::CalculateImagePlacement(200, 150, 100, 100, settings);
+        assert(placement.left == -16 && placement.top == 0);
+        assert(placement.width == 133 && placement.height == 100);
+
+        settings.largeImageMode = swc::LargeImageMode::fit;
+        placement = swc::CalculateImagePlacement(200, 100, 100, 100, settings);
+        assert(placement.left == 0 && placement.top == 25);
+        assert(placement.width == 100 && placement.height == 50);
+    }
 
     {
         std::vector<swc::ColorSample> pixels(100, {0, 0, 255, 255});

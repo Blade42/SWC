@@ -67,6 +67,22 @@ constexpr int kBackgroundFillColorButtonId = 2014;
 constexpr int kBackgroundFillModeLabelId = 2015;
 constexpr int kBackgroundFillColorLabelId = 2016;
 constexpr int kBackgroundAdaptiveModeRadioId = 2017;
+constexpr int kImageResizeToRadioId = 2018;
+constexpr int kImageAutoFitRadioId = 2019;
+constexpr int kImageResizeToPercentEditId = 2020;
+constexpr int kImageResizeToPercentLabelId = 2021;
+constexpr int kImageSmallGroupId = 2022;
+constexpr int kImageSmallCenteredRadioId = 2023;
+constexpr int kImageSmallTileRadioId = 2024;
+constexpr int kImageSmallFitRadioId = 2025;
+constexpr int kImageMaxEnlargeLabelId = 2026;
+constexpr int kImageMaxEnlargePercentEditId = 2027;
+constexpr int kImageMaxEnlargePercentLabelId = 2028;
+constexpr int kImageLargeGroupId = 2029;
+constexpr int kImageLargeCenteredRadioId = 2030;
+constexpr int kImageLargeFillRadioId = 2031;
+constexpr int kImageLargeFitRadioId = 2032;
+constexpr int kImageResizeToPercentUnitLabelId = 2033;
 constexpr UINT kSetDisplayCommandBase = 40000;
 constexpr int kPlaylistThumbnailSize = 64;
 constexpr std::size_t kPlaylistThumbnailCacheLimit = 512;
@@ -77,7 +93,8 @@ constexpr int kSettingsMinimumClientHeight = 640;
 constexpr DWORD kSettingsWindowStyle =
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN |
     WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX;
-constexpr DWORD kSettingsWindowExtendedStyle = WS_EX_DLGMODALFRAME;
+constexpr DWORD kSettingsWindowExtendedStyle =
+    WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
 constexpr wchar_t kMonitorPreviewPanelClass[] = L"SWCMonitorPreviewPanel";
 constexpr wchar_t kPlaylistDragGhostClass[] = L"SWCPlaylistDragGhost";
 constexpr int kPlaylistDragGhostWidth = 110;
@@ -849,9 +866,19 @@ void CreateBackgroundPng(
         Fail(L"The image has invalid dimensions.");
     }
 
-    const auto fit = swc::CalculateFitRect(sourceWidth, sourceHeight, outputWidth, outputHeight);
-    const UINT scaledWidth = fit.width;
-    const UINT scaledHeight = fit.height;
+    const auto placement = swc::CalculateImagePlacement(
+        sourceWidth,
+        sourceHeight,
+        outputWidth,
+        outputHeight,
+        settings);
+    const UINT scaledWidth = placement.width;
+    const UINT scaledHeight = placement.height;
+    if (scaledWidth == 0 || scaledHeight == 0 ||
+        scaledWidth > static_cast<UINT>(std::numeric_limits<LONG>::max()) ||
+        scaledHeight > static_cast<UINT>(std::numeric_limits<LONG>::max())) {
+        Fail(L"The selected image sizing produces dimensions that are too large.");
+    }
 
     ComPtr<IWICFormatConverter> converter;
     CheckHr(factory->CreateFormatConverter(converter.Put()), L"Could not create image converter");
@@ -880,15 +907,11 @@ void CreateBackgroundPng(
             WICBitmapInterpolationModeFant),
         L"Could not resize the source image");
 
-    if (outputWidth > std::numeric_limits<UINT>::max() / 4 / outputHeight ||
-        scaledWidth > std::numeric_limits<UINT>::max() / 4 / scaledHeight) {
+    if (outputWidth > std::numeric_limits<UINT>::max() / 4 / outputHeight) {
         Fail(L"The image dimensions are too large to process.");
     }
     const std::uint64_t outputBytes =
         static_cast<std::uint64_t>(outputWidth) * outputHeight * 4;
-    const std::uint64_t scaledBytes =
-        static_cast<std::uint64_t>(scaledWidth) * scaledHeight * 4;
-
     std::vector<BYTE> canvas(static_cast<std::size_t>(outputBytes));
     for (std::size_t offset = 0; offset < canvas.size(); offset += 4) {
         canvas[offset] = background.blue;
@@ -897,30 +920,102 @@ void CreateBackgroundPng(
         canvas[offset + 3] = 255;
     }
 
-    const UINT scaledStride = scaledWidth * 4;
-    std::vector<BYTE> scaledPixels(static_cast<std::size_t>(scaledBytes));
-    CheckHr(
-        scaler->CopyPixels(
-            nullptr,
-            scaledStride,
-            static_cast<UINT>(scaledBytes),
-            scaledPixels.data()),
-        L"Could not read the resized image pixels");
-
     const UINT outputStride = outputWidth * 4;
-    for (UINT row = 0; row < scaledHeight; ++row) {
-        const std::size_t sourceOffset = static_cast<std::size_t>(row) * scaledStride;
-        const std::size_t destinationOffset =
-            static_cast<std::size_t>(fit.top + row) * outputStride +
-            static_cast<std::size_t>(fit.left) * 4;
-        for (UINT column = 0; column < scaledWidth; ++column) {
-            const std::size_t pixel = sourceOffset + static_cast<std::size_t>(column) * 4;
-            const std::size_t outputPixel =
-                destinationOffset + static_cast<std::size_t>(column) * 4;
-            canvas[outputPixel] = scaledPixels[pixel];
-            canvas[outputPixel + 1] = scaledPixels[pixel + 1];
-            canvas[outputPixel + 2] = scaledPixels[pixel + 2];
-            canvas[outputPixel + 3] = 255;
+    std::vector<BYTE> tilePixels;
+    UINT tileStride = 0;
+    if (placement.tileColumns > 1 || placement.tileRows > 1) {
+        const std::uint64_t tileBytes =
+            static_cast<std::uint64_t>(scaledWidth) * scaledHeight * 4;
+        if (tileBytes > std::numeric_limits<UINT>::max()) {
+            Fail(L"The tile image is too large to process.");
+        }
+        tileStride = scaledWidth * 4;
+        tilePixels.resize(static_cast<std::size_t>(tileBytes));
+        CheckHr(
+            scaler->CopyPixels(
+                nullptr,
+                tileStride,
+                static_cast<UINT>(tileBytes),
+                tilePixels.data()),
+            L"Could not read the tiled image pixels");
+    }
+
+    const auto drawTile = [&](std::int64_t left, std::int64_t top) {
+        const std::int64_t clippedLeft = std::max<std::int64_t>(0, left);
+        const std::int64_t clippedTop = std::max<std::int64_t>(0, top);
+        const std::int64_t clippedRight = std::min<std::int64_t>(
+            outputWidth, left + scaledWidth);
+        const std::int64_t clippedBottom = std::min<std::int64_t>(
+            outputHeight, top + scaledHeight);
+        if (clippedLeft >= clippedRight || clippedTop >= clippedBottom) {
+            return;
+        }
+
+        const UINT copyWidth = static_cast<UINT>(clippedRight - clippedLeft);
+        const UINT copyHeight = static_cast<UINT>(clippedBottom - clippedTop);
+        const UINT copyStride = copyWidth * 4;
+        if (!tilePixels.empty()) {
+            for (UINT row = 0; row < copyHeight; ++row) {
+                const std::size_t sourceOffset =
+                    static_cast<std::size_t>(clippedTop + row - top) * tileStride +
+                    static_cast<std::size_t>(clippedLeft - left) * 4;
+                const std::size_t destinationOffset =
+                    static_cast<std::size_t>(clippedTop + row) * outputStride +
+                    static_cast<std::size_t>(clippedLeft) * 4;
+                std::copy_n(
+                    tilePixels.data() + sourceOffset,
+                    copyStride,
+                    canvas.data() + destinationOffset);
+                for (UINT column = 0; column < copyWidth; ++column) {
+                    canvas[destinationOffset + static_cast<std::size_t>(column) * 4 + 3] =
+                        255;
+                }
+            }
+            return;
+        }
+
+        const std::uint64_t copyBytes =
+            static_cast<std::uint64_t>(copyStride) * copyHeight;
+        if (copyBytes > std::numeric_limits<UINT>::max()) {
+            Fail(L"The selected image area is too large to process.");
+        }
+        std::vector<BYTE> scaledPixels(static_cast<std::size_t>(copyBytes));
+        WICRect sourceRect{
+            static_cast<INT>(clippedLeft - left),
+            static_cast<INT>(clippedTop - top),
+            static_cast<INT>(copyWidth),
+            static_cast<INT>(copyHeight)};
+        CheckHr(
+            scaler->CopyPixels(
+                &sourceRect,
+                copyStride,
+                static_cast<UINT>(copyBytes),
+                scaledPixels.data()),
+            L"Could not read the resized image pixels");
+
+        for (UINT row = 0; row < copyHeight; ++row) {
+            const std::size_t sourceOffset = static_cast<std::size_t>(row) * copyStride;
+            const std::size_t destinationOffset =
+                static_cast<std::size_t>(clippedTop + row) * outputStride +
+                static_cast<std::size_t>(clippedLeft) * 4;
+            for (UINT column = 0; column < copyWidth; ++column) {
+                const std::size_t pixel =
+                    sourceOffset + static_cast<std::size_t>(column) * 4;
+                const std::size_t outputPixel =
+                    destinationOffset + static_cast<std::size_t>(column) * 4;
+                canvas[outputPixel] = scaledPixels[pixel];
+                canvas[outputPixel + 1] = scaledPixels[pixel + 1];
+                canvas[outputPixel + 2] = scaledPixels[pixel + 2];
+                canvas[outputPixel + 3] = 255;
+            }
+        }
+    };
+
+    for (std::uint32_t row = 0; row < placement.tileRows; ++row) {
+        for (std::uint32_t column = 0; column < placement.tileColumns; ++column) {
+            drawTile(
+                placement.left + static_cast<std::int64_t>(column) * scaledWidth,
+                placement.top + static_cast<std::int64_t>(row) * scaledHeight);
         }
     }
 
@@ -1416,6 +1511,33 @@ void WriteSettingsFile(
         << std::setw(2) << static_cast<unsigned int>(settings.backgroundFillColor.blue);
     contents += L"; Fill color in RGB hex; used when background_fill=fill_color.\r\n"
         L"background_color=" + backgroundColor.str() + L"\r\n"
+        L"; Image sizing: resize_to or autofit.\r\n"
+        L"image_sizing=" +
+        std::wstring(
+            settings.imageSizingMode == swc::ImageSizingMode::resizeTo
+                ? L"resize_to"
+                : L"autofit") + L"\r\n"
+        L"; Resize-to target percentage: 1 through 1000.\r\n"
+        L"resize_to_percent=" + std::to_wstring(settings.resizeToPercent) + L"\r\n"
+        L"; Autofit behavior for images that fit inside the display: centered, tile, or fit.\r\n"
+        L"autofit_small=" +
+        std::wstring(
+            settings.smallImageMode == swc::SmallImageMode::centered
+                ? L"centered"
+                : settings.smallImageMode == swc::SmallImageMode::tile
+                ? L"tile"
+                : L"fit") + L"\r\n"
+        L"; Maximum enlargement percentage for small-image Fit: 100 through 1000.\r\n"
+        L"autofit_max_enlarge_percent=" +
+        std::to_wstring(settings.maxSmallImageEnlargePercent) + L"\r\n"
+        L"; Autofit behavior for images exceeding the display: centered, fill, or fit.\r\n"
+        L"autofit_large=" +
+        std::wstring(
+            settings.largeImageMode == swc::LargeImageMode::centered
+                ? L"centered"
+                : settings.largeImageMode == swc::LargeImageMode::fill
+                ? L"fill"
+                : L"fit") + L"\r\n"
         L"; Example configuration:\r\n"
         L"; source_directories=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
         L"; source_directories=-D:\\SeasonalWallpapers\r\n"
@@ -1474,6 +1596,11 @@ void UpdateUserSettings(
     settings.openWindowOnStart = preferences.openWindowOnStart;
     settings.backgroundFillMode = preferences.backgroundFillMode;
     settings.backgroundFillColor = preferences.backgroundFillColor;
+    settings.imageSizingMode = preferences.imageSizingMode;
+    settings.resizeToPercent = preferences.resizeToPercent;
+    settings.smallImageMode = preferences.smallImageMode;
+    settings.maxSmallImageEnlargePercent = preferences.maxSmallImageEnlargePercent;
+    settings.largeImageMode = preferences.largeImageMode;
     WriteSettingsFile(path, settings);
 }
 
@@ -1850,6 +1977,22 @@ struct ResidentState {
     HWND backgroundAdaptiveModeRadio = nullptr;
     HWND backgroundFillColorLabel = nullptr;
     HWND backgroundFillColorButton = nullptr;
+    HWND imageResizeToRadio = nullptr;
+    HWND imageAutoFitRadio = nullptr;
+    HWND imageResizeToPercentEdit = nullptr;
+    HWND imageResizeToPercentLabel = nullptr;
+    HWND imageResizeToPercentUnitLabel = nullptr;
+    HWND imageSmallGroup = nullptr;
+    HWND imageSmallCenteredRadio = nullptr;
+    HWND imageSmallTileRadio = nullptr;
+    HWND imageSmallFitRadio = nullptr;
+    HWND imageMaxEnlargeLabel = nullptr;
+    HWND imageMaxEnlargePercentEdit = nullptr;
+    HWND imageMaxEnlargePercentLabel = nullptr;
+    HWND imageLargeGroup = nullptr;
+    HWND imageLargeCenteredRadio = nullptr;
+    HWND imageLargeFillRadio = nullptr;
+    HWND imageLargeFitRadio = nullptr;
     RECT settingsWindowNormalRect{};
     bool hasSettingsWindowNormalRect = false;
     HWND sourceDirectoryList = nullptr;
@@ -3057,6 +3200,31 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
     moveControl(state.backgroundFillColorLabel, 58, 260, 122, 28);
     moveControl(state.backgroundFillColorButton, 180, 253, 180, 42);
     moveControl(state.backgroundAdaptiveModeRadio, 30, 306, 600, 28);
+    moveControl(state.imageResizeToRadio, 30, 190, clientWidth - 60, 28);
+    moveControl(state.imageResizeToPercentLabel, 58, 226, 168, 26);
+    moveControl(state.imageResizeToPercentEdit, 230, 221, 64, 27);
+    moveControl(state.imageResizeToPercentUnitLabel, 300, 226, 24, 26);
+    moveControl(state.imageAutoFitRadio, 30, 263, clientWidth - 60, 28);
+    const int imageGroupWidth = std::max(300, (clientWidth - 80) / 2);
+    const int imageLargeGroupX = clientWidth - 30 - imageGroupWidth;
+    moveControl(state.imageSmallGroup, 30, 300, imageGroupWidth, 220);
+    moveControl(state.imageSmallCenteredRadio, 50, 326, imageGroupWidth - 40, 28);
+    moveControl(state.imageSmallTileRadio, 50, 360, imageGroupWidth - 40, 28);
+    moveControl(state.imageSmallFitRadio, 50, 394, imageGroupWidth - 40, 28);
+    moveControl(state.imageMaxEnlargeLabel, 72, 432, 170, 26);
+    moveControl(state.imageMaxEnlargePercentEdit, 247, 427, 64, 27);
+    moveControl(state.imageMaxEnlargePercentLabel, 315, 432, 32, 26);
+    moveControl(
+        state.imageLargeGroup, imageLargeGroupX, 300, imageGroupWidth, 220);
+    moveControl(
+        state.imageLargeCenteredRadio,
+        imageLargeGroupX + 20, 326, imageGroupWidth - 40, 28);
+    moveControl(
+        state.imageLargeFillRadio,
+        imageLargeGroupX + 20, 360, imageGroupWidth - 40, 28);
+    moveControl(
+        state.imageLargeFitRadio,
+        imageLargeGroupX + 20, 394, imageGroupWidth - 40, 28);
     moveControl(
         GetDlgItem(state.settingsWindow, kExitSettingsButtonId),
         clientWidth - 28 - 82 - 10 - 82,
@@ -3159,6 +3327,84 @@ bool IsSettingsWindowBoundsUsable(const swc::WindowBounds& bounds) {
     return visibleWidth >= 100 && visibleHeight >= 100;
 }
 
+void SyncImageSizingControls(ResidentState& state) {
+    const bool resizeTo =
+        state.settings.imageSizingMode == swc::ImageSizingMode::resizeTo;
+    const bool autoFit = !resizeTo;
+    const bool smallFit =
+        state.settings.smallImageMode == swc::SmallImageMode::fit;
+    SendMessageW(
+        state.imageResizeToRadio,
+        BM_SETCHECK,
+        resizeTo ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.imageAutoFitRadio,
+        BM_SETCHECK,
+        autoFit ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.imageSmallCenteredRadio,
+        BM_SETCHECK,
+        state.settings.smallImageMode == swc::SmallImageMode::centered
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.imageSmallTileRadio,
+        BM_SETCHECK,
+        state.settings.smallImageMode == swc::SmallImageMode::tile
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.imageSmallFitRadio,
+        BM_SETCHECK,
+        smallFit ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.imageLargeCenteredRadio,
+        BM_SETCHECK,
+        state.settings.largeImageMode == swc::LargeImageMode::centered
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.imageLargeFillRadio,
+        BM_SETCHECK,
+        state.settings.largeImageMode == swc::LargeImageMode::fill
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.imageLargeFitRadio,
+        BM_SETCHECK,
+        state.settings.largeImageMode == swc::LargeImageMode::fit
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
+
+    EnableWindow(state.imageResizeToPercentEdit, resizeTo);
+    EnableWindow(state.imageResizeToPercentLabel, resizeTo);
+    EnableWindow(state.imageResizeToPercentUnitLabel, resizeTo);
+    EnableWindow(state.imageSmallGroup, autoFit);
+    EnableWindow(state.imageSmallCenteredRadio, autoFit);
+    EnableWindow(state.imageSmallTileRadio, autoFit);
+    EnableWindow(state.imageSmallFitRadio, autoFit);
+    EnableWindow(state.imageMaxEnlargeLabel, autoFit && smallFit);
+    EnableWindow(state.imageMaxEnlargePercentEdit, autoFit && smallFit);
+    EnableWindow(state.imageMaxEnlargePercentLabel, autoFit && smallFit);
+    EnableWindow(state.imageLargeGroup, autoFit);
+    EnableWindow(state.imageLargeCenteredRadio, autoFit);
+    EnableWindow(state.imageLargeFillRadio, autoFit);
+    EnableWindow(state.imageLargeFitRadio, autoFit);
+    if (state.imageResizeToPercentEdit) {
+        SetWindowTextW(
+            state.imageResizeToPercentEdit,
+            std::to_wstring(state.settings.resizeToPercent).c_str());
+    }
+    if (state.imageMaxEnlargePercentEdit) {
+        SetWindowTextW(
+            state.imageMaxEnlargePercentEdit,
+            std::to_wstring(state.settings.maxSmallImageEnlargePercent).c_str());
+    }
+}
+
 void ShowSettingsPage(ResidentState& state) {
     const int page = TabCtrl_GetCurSel(state.settingsTabs);
     const bool startupPage = page == 0;
@@ -3185,6 +3431,24 @@ void ShowSettingsPage(ResidentState& state) {
         EnableWindow(state.backgroundFillColorLabel, fillColorMode);
         EnableWindow(state.backgroundFillColorButton, fillColorMode);
     }
+    const bool imagePage = page == 4;
+    ShowWindow(state.imageResizeToRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageAutoFitRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageResizeToPercentEdit, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageResizeToPercentLabel, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageResizeToPercentUnitLabel, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageSmallGroup, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageSmallCenteredRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageSmallTileRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageSmallFitRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageMaxEnlargeLabel, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageMaxEnlargePercentEdit, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageMaxEnlargePercentLabel, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageLargeGroup, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageLargeCenteredRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageLargeFillRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imageLargeFitRadio, imagePage ? SW_SHOW : SW_HIDE);
+    SyncImageSizingControls(state);
 }
 
 void SaveSourceDirectoryListWithError(
@@ -3477,6 +3741,59 @@ void SaveBackgroundSettings(
     }
 }
 
+void SaveImageSettings(
+    ResidentState& state,
+    swc::Settings updated,
+    HWND owner) {
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        SyncImageSizingControls(state);
+        RequestBackgroundReapply(state);
+    } catch (const Failure& failure) {
+        SyncImageSizingControls(state);
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        SyncImageSizingControls(state);
+        ShowError(L"Could not save the Image settings.", owner);
+    }
+}
+
+void SaveImagePercentSetting(
+    ResidentState& state,
+    bool maximumEnlarge,
+    HWND owner) {
+    const HWND edit = maximumEnlarge
+        ? state.imageMaxEnlargePercentEdit
+        : state.imageResizeToPercentEdit;
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<std::size_t>(std::max(0, length)) + 1, L'\0');
+    const int copied = GetWindowTextW(
+        edit,
+        text.data(),
+        static_cast<int>(text.size()));
+    text.resize(static_cast<std::size_t>(std::max(0, copied)));
+    std::uint32_t percent = 0;
+    const std::uint32_t minimum = maximumEnlarge ? 100 : 1;
+    if (!swc::ParsePercent(text, minimum, 1000, percent)) {
+        ShowError(
+            maximumEnlarge
+                ? L"Maximum enlargement must be between 100% and 1000%."
+                : L"Resize-to target must be between 1% and 1000%.",
+            owner);
+        SyncImageSizingControls(state);
+        return;
+    }
+
+    auto updated = state.settings;
+    if (maximumEnlarge) {
+        updated.maxSmallImageEnlargePercent = percent;
+    } else {
+        updated.resizeToPercent = percent;
+    }
+    SaveImageSettings(state, std::move(updated), owner);
+}
+
 void ChooseBackgroundFillColor(ResidentState& state, HWND owner) {
     const COLORREF initialColor = RGB(
         state.settings.backgroundFillColor.red,
@@ -3619,6 +3936,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             wchar_t sourcesTabText[] = L"Sources";
             wchar_t playlistTabText[] = L"Playlist";
             wchar_t backgroundTabText[] = L"Background";
+            wchar_t imageTabText[] = L"Image";
             TCITEMW tab{};
             tab.mask = TCIF_TEXT;
             tab.pszText = startupTabText;
@@ -3636,6 +3954,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             tab.pszText = backgroundTabText;
             if (TabCtrl_InsertItem(state->settingsTabs, 3, &tab) == -1) {
                 Fail(L"Could not add the Background settings tab.");
+            }
+            tab.pszText = imageTabText;
+            if (TabCtrl_InsertItem(state->settingsTabs, 4, &tab) == -1) {
+                Fail(L"Could not add the Image settings tab.");
             }
             TabCtrl_SetCurSel(state->settingsTabs, 0);
 
@@ -3699,6 +4021,97 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 0);
             EnableWindow(state->backgroundFillColorLabel, fillColorMode);
             EnableWindow(state->backgroundFillColorButton, fillColorMode);
+
+            state->imageResizeToRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Resize to...",
+                WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                30, 190, 450, 28, window, kImageResizeToRadioId,
+                state->instance, state->settingsFont);
+            state->imageResizeToPercentLabel = CreateSettingsControl(
+                0, L"STATIC", L"Target on closer dimension:",
+                WS_CHILD | SS_LEFT,
+                58, 226, 168, 26, window, kImageResizeToPercentLabelId,
+                state->instance, state->settingsFont);
+            state->imageResizeToPercentEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                230, 221, 64, 27, window, kImageResizeToPercentEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->imageResizeToPercentEdit, EM_LIMITTEXT, 4, 0);
+            SetWindowTextW(
+                state->imageResizeToPercentEdit,
+                std::to_wstring(state->settings.resizeToPercent).c_str());
+            state->imageResizeToPercentUnitLabel = CreateSettingsControl(
+                0, L"STATIC", L"%",
+                WS_CHILD | SS_LEFT,
+                300, 226, 24, 26, window, kImageResizeToPercentUnitLabelId,
+                state->instance, state->settingsFont);
+            state->imageAutoFitRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Autofit...",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                30, 263, 450, 28, window, kImageAutoFitRadioId,
+                state->instance, state->settingsFont);
+            state->imageSmallGroup = CreateSettingsControl(
+                0, L"BUTTON", L"If the image is too small",
+                WS_CHILD | BS_GROUPBOX,
+                30, 300, 444, 220, window, kImageSmallGroupId,
+                state->instance, state->settingsFont);
+            state->imageLargeGroup = CreateSettingsControl(
+                0, L"BUTTON", L"If the image is too large",
+                WS_CHILD | BS_GROUPBOX,
+                490, 300, 444, 220, window, kImageLargeGroupId,
+                state->instance, state->settingsFont);
+            state->imageSmallCenteredRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Centered - display without enlarging",
+                WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                50, 326, 390, 28, window, kImageSmallCenteredRadioId,
+                state->instance, state->settingsFont);
+            state->imageSmallTileRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Tile",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                50, 360, 390, 28, window, kImageSmallTileRadioId,
+                state->instance, state->settingsFont);
+            state->imageSmallFitRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Fit - enlarge to touch the frame",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                50, 394, 390, 28, window, kImageSmallFitRadioId,
+                state->instance, state->settingsFont);
+            state->imageMaxEnlargeLabel = CreateSettingsControl(
+                0, L"STATIC", L"Maximum enlargement:",
+                WS_CHILD | SS_LEFT,
+                72, 432, 170, 26, window, kImageMaxEnlargeLabelId,
+                state->instance, state->settingsFont);
+            state->imageMaxEnlargePercentEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                247, 427, 64, 27, window, kImageMaxEnlargePercentEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->imageMaxEnlargePercentEdit, EM_LIMITTEXT, 4, 0);
+            SetWindowTextW(
+                state->imageMaxEnlargePercentEdit,
+                std::to_wstring(
+                    state->settings.maxSmallImageEnlargePercent).c_str());
+            state->imageMaxEnlargePercentLabel = CreateSettingsControl(
+                0, L"STATIC", L"%",
+                WS_CHILD | SS_LEFT,
+                315, 432, 32, 26, window, kImageMaxEnlargePercentLabelId,
+                state->instance, state->settingsFont);
+            state->imageLargeCenteredRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Centered - crop equally from each side",
+                WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                510, 326, 390, 28, window, kImageLargeCenteredRadioId,
+                state->instance, state->settingsFont);
+            state->imageLargeFillRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Fill - crop the longer dimension",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                510, 360, 390, 28, window, kImageLargeFillRadioId,
+                state->instance, state->settingsFont);
+            state->imageLargeFitRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Fit - show the entire image",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                510, 394, 390, 28, window, kImageLargeFitRadioId,
+                state->instance, state->settingsFont);
+            SyncImageSizingControls(*state);
 
             state->sourceDirectoryList = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -4064,6 +4477,58 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
         }
         switch (LOWORD(wParam)) {
+        case kImageResizeToRadioId:
+        case kImageAutoFitRadioId:
+        case kImageSmallCenteredRadioId:
+        case kImageSmallTileRadioId:
+        case kImageSmallFitRadioId:
+        case kImageLargeCenteredRadioId:
+        case kImageLargeFillRadioId:
+        case kImageLargeFitRadioId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                auto updated = state->settings;
+                switch (LOWORD(wParam)) {
+                case kImageResizeToRadioId:
+                    updated.imageSizingMode = swc::ImageSizingMode::resizeTo;
+                    break;
+                case kImageAutoFitRadioId:
+                    updated.imageSizingMode = swc::ImageSizingMode::autoFit;
+                    break;
+                case kImageSmallCenteredRadioId:
+                    updated.smallImageMode = swc::SmallImageMode::centered;
+                    break;
+                case kImageSmallTileRadioId:
+                    updated.smallImageMode = swc::SmallImageMode::tile;
+                    break;
+                case kImageSmallFitRadioId:
+                    updated.smallImageMode = swc::SmallImageMode::fit;
+                    break;
+                case kImageLargeCenteredRadioId:
+                    updated.largeImageMode = swc::LargeImageMode::centered;
+                    break;
+                case kImageLargeFillRadioId:
+                    updated.largeImageMode = swc::LargeImageMode::fill;
+                    break;
+                case kImageLargeFitRadioId:
+                    updated.largeImageMode = swc::LargeImageMode::fit;
+                    break;
+                }
+                SaveImageSettings(*state, std::move(updated), window);
+                return 0;
+            }
+            break;
+        case kImageResizeToPercentEditId:
+            if (HIWORD(wParam) == EN_KILLFOCUS) {
+                SaveImagePercentSetting(*state, false, window);
+                return 0;
+            }
+            break;
+        case kImageMaxEnlargePercentEditId:
+            if (HIWORD(wParam) == EN_KILLFOCUS) {
+                SaveImagePercentSetting(*state, true, window);
+                return 0;
+            }
+            break;
         case kBackgroundFillColorModeRadioId:
         case kBackgroundAdaptiveModeRadioId:
             if (HIWORD(wParam) == BN_CLICKED) {
@@ -4344,6 +4809,22 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->backgroundAdaptiveModeRadio = nullptr;
             state->backgroundFillColorLabel = nullptr;
             state->backgroundFillColorButton = nullptr;
+            state->imageResizeToRadio = nullptr;
+            state->imageAutoFitRadio = nullptr;
+            state->imageResizeToPercentEdit = nullptr;
+            state->imageResizeToPercentLabel = nullptr;
+            state->imageResizeToPercentUnitLabel = nullptr;
+            state->imageSmallGroup = nullptr;
+            state->imageSmallCenteredRadio = nullptr;
+            state->imageSmallTileRadio = nullptr;
+            state->imageSmallFitRadio = nullptr;
+            state->imageMaxEnlargeLabel = nullptr;
+            state->imageMaxEnlargePercentEdit = nullptr;
+            state->imageMaxEnlargePercentLabel = nullptr;
+            state->imageLargeGroup = nullptr;
+            state->imageLargeCenteredRadio = nullptr;
+            state->imageLargeFillRadio = nullptr;
+            state->imageLargeFitRadio = nullptr;
             state->sourceDirectoryList = nullptr;
             state->sourceDirectoryHint = nullptr;
             state->playlistList = nullptr;
@@ -4772,6 +5253,10 @@ int RunResident(HINSTANCE instance) {
         }
         if (result == 0) {
             break;
+        }
+        if (state.settingsWindow &&
+            IsDialogMessageW(state.settingsWindow, &message)) {
+            continue;
         }
         TranslateMessage(&message);
         DispatchMessageW(&message);
