@@ -327,7 +327,19 @@ bool IsGeneratedWallpaperFile(const std::filesystem::path& path) {
     if (CompareStringOrdinal(extension.c_str(), -1, L".png", -1, TRUE) != CSTR_EQUAL) {
         return false;
     }
-    const auto stem = path.stem().wstring();
+    auto stem = path.stem().wstring();
+    const auto reapplyMarker = stem.rfind(L"-reapply-");
+    if (reapplyMarker != std::wstring::npos) {
+        const auto refreshId = stem.substr(reapplyMarker + 9);
+        if (refreshId.empty() || !std::all_of(
+                refreshId.begin(),
+                refreshId.end(),
+                [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; })) {
+            return false;
+        }
+        stem.resize(reapplyMarker);
+    }
+
     constexpr wchar_t baseName[] = L"wallpaper-background";
     if (CompareStringOrdinal(
             stem.c_str(),
@@ -421,6 +433,30 @@ bool WindowsTextEquals(const std::wstring& left, const std::wstring& right) {
         right.data(),
         static_cast<int>(right.size()),
         TRUE) == CSTR_EQUAL;
+}
+
+bool IsReappliedWallpaperVariant(
+    const std::filesystem::path& candidate,
+    const std::filesystem::path& basePath) {
+    if (!WindowsTextEquals(
+            candidate.parent_path().wstring(),
+            basePath.parent_path().wstring()) ||
+        !WindowsTextEquals(
+            candidate.extension().wstring(),
+            basePath.extension().wstring())) {
+        return false;
+    }
+    const auto candidateStem = candidate.stem().wstring();
+    const auto baseStem = basePath.stem().wstring();
+    const std::wstring prefix = baseStem + L"-reapply-";
+    if (!StartsWithWindowsText(candidateStem, prefix)) {
+        return false;
+    }
+    const auto refreshId = candidateStem.substr(prefix.size());
+    return !refreshId.empty() && std::all_of(
+        refreshId.begin(),
+        refreshId.end(),
+        [](wchar_t ch) { return ch >= L'0' && ch <= L'9'; });
 }
 
 std::filesystem::path DedicatedDisplayWallpaperPath(
@@ -1276,6 +1312,63 @@ void ApplyWallpaper(
         L"Windows could not apply the wallpaper to a display");
 }
 
+void RemoveUnusedGeneratedWallpapers(
+    const std::filesystem::path& directory,
+    IDesktopWallpaper* wallpaper,
+    const std::vector<Display>& displays) {
+    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+        const auto& display = displays[displayIndex];
+        LPWSTR rawWallpaperPath = nullptr;
+        CheckHr(
+            wallpaper->GetWallpaper(display.devicePath.c_str(), &rawWallpaperPath),
+            L"Could not inspect the current wallpaper for " + display.friendlyName);
+        std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> wallpaperPath(
+            rawWallpaperPath, CoTaskMemFree);
+        const std::wstring baseName = displayIndex == 0
+            ? L"wallpaper-background"
+            : L"wallpaper-background-" + std::to_wstring(displayIndex + 1);
+        const auto basePath = directory / (baseName + L".png");
+
+        std::error_code error;
+        std::filesystem::directory_iterator iterator(directory, error);
+        if (error) {
+            Fail(L"Could not inspect generated wallpapers: " + FilesystemErrorText(error));
+        }
+        const std::filesystem::directory_iterator end;
+        for (; iterator != end; iterator.increment(error)) {
+            if (error) {
+                Fail(L"Could not enumerate generated wallpapers: " + FilesystemErrorText(error));
+            }
+
+            const auto& entry = *iterator;
+            const bool regularFile = entry.is_regular_file(error);
+            if (error) {
+                Fail(L"Could not inspect a generated wallpaper: " + FilesystemErrorText(error));
+            }
+            if (!regularFile || !IsReappliedWallpaperVariant(entry.path(), basePath)) {
+                continue;
+            }
+            if (wallpaperPath &&
+                WindowsTextEquals(entry.path().wstring(), wallpaperPath.get())) {
+                continue;
+            }
+            if (!DeleteFileW(entry.path().c_str())) {
+                const DWORD deleteError = GetLastError();
+                if (deleteError != ERROR_FILE_NOT_FOUND &&
+                    deleteError != ERROR_PATH_NOT_FOUND) {
+                    FailWin32(
+                        L"Could not remove an unused generated wallpaper",
+                        deleteError);
+                }
+            }
+        }
+        if (error) {
+            Fail(L"Could not finish enumerating generated wallpapers: " +
+                FilesystemErrorText(error));
+        }
+    }
+}
+
 void WriteSettingsFile(
     const std::filesystem::path& path,
     const swc::Settings& settings) {
@@ -1558,6 +1651,7 @@ void Run(const WallpaperRequest& request) {
         for (const auto& item : generated) {
             ApplyWallpaper(wallpaper.Get(), item.display, item.outputPath);
         }
+        RemoveUnusedGeneratedWallpapers(executableDirectory, wallpaper.Get(), displays);
         return;
     }
 
@@ -1702,6 +1796,7 @@ void Run(const WallpaperRequest& request) {
         request.previous && request.displayDevicePath.empty() ? lastDisplayImage : lastImage,
         displayImages,
         request.displayDevicePath.empty());
+    RemoveUnusedGeneratedWallpapers(executableDirectory, wallpaper.Get(), displays);
 }
 
 void ShowError(const std::wstring& message, HWND owner = nullptr) {
@@ -2406,6 +2501,7 @@ void RefreshPlaylistDisplayAssignments(
             rawWallpaperPath, CoTaskMemFree);
         if (!wallpaperPath ||
             (!WindowsTextEquals(wallpaperPath.get(), expectedOutput) &&
+                !IsReappliedWallpaperVariant(wallpaperPath.get(), expectedOutput) &&
                 !WindowsTextEquals(wallpaperPath.get(), dedicatedOutput))) {
             continue;
         }

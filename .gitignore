@@ -1,13 +1,3 @@
-build/wallpaper-background.png
-build/wallpaper-background-2.png
-settings.ini
-/build/CMakeCache.txt
-/build/CMakeFiles/
-/build/CTestTestfile.cmake
-/build/DartConfiguration.tcl
-/build/Makefile
-/build/cmake_install.cmake
-/build/Testing/
 # Generated build outputs; keep the distributable sample settings file.
 /build/*
 !/build/settings.sample.ini
