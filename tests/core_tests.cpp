@@ -121,6 +121,37 @@ int main() {
         assert(!swc::ParseSettings(input).hasWindowBounds);
     }
 
+    {
+        std::wistringstream input(L"");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.backgroundFillMode == swc::BackgroundFillMode::adaptiveToImage);
+        assert(settings.backgroundFillColor.red == 0);
+        assert(settings.backgroundFillColor.green == 0);
+        assert(settings.backgroundFillColor.blue == 0);
+    }
+
+    {
+        std::wistringstream input(
+            L"background_fill=fill_color\n"
+            L"background_color=3A7FC1\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.backgroundFillMode == swc::BackgroundFillMode::fillColor);
+        assert(settings.backgroundFillColor.red == 0x3A);
+        assert(settings.backgroundFillColor.green == 0x7F);
+        assert(settings.backgroundFillColor.blue == 0xC1);
+    }
+
+    {
+        std::wistringstream input(
+            L"background_fill=unknown\n"
+            L"background_color=nothex\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.backgroundFillMode == swc::BackgroundFillMode::adaptiveToImage);
+        assert(settings.backgroundFillColor.red == 0);
+        assert(settings.backgroundFillColor.green == 0);
+        assert(settings.backgroundFillColor.blue == 0);
+    }
+
     assert(swc::IsSupportedExtension(L".JPG"));
     assert(swc::IsSupportedExtension(L".jpeg"));
     assert(swc::IsSupportedExtension(L".Png"));
