@@ -2690,6 +2690,13 @@ struct PlaylistRefreshPacket {
     std::wstring error;
 };
 
+struct PlaylistThumbnailSchedule {
+    std::mutex mutex;
+    std::deque<std::size_t> pendingRows;
+    std::vector<bool> pending;
+    bool rowsReady = false;
+};
+
 struct ResidentState {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
@@ -2767,9 +2774,13 @@ struct ResidentState {
     std::mutex playlistPacketMutex;
     std::vector<PlaylistRefreshPacket> playlistPackets;
     std::shared_ptr<std::atomic_bool> playlistCancel;
+    std::shared_ptr<PlaylistThumbnailSchedule> playlistThumbnailSchedule;
     std::thread playlistThread;
     std::uint64_t playlistGeneration = 0;
     std::size_t playlistInvalidCount = 0;
+    int playlistPriorityFirstVisibleRow = -1;
+    int playlistPriorityVisibleRowCount = -1;
+    bool playlistRowsApplied = false;
     bool playlistRunning = false;
     bool playlistRefreshPending = false;
     std::wstring settingsWindowError;
@@ -4063,6 +4074,7 @@ void FinishPlaylistRefresh(ResidentState& state) {
     }
     state.playlistRunning = false;
     state.playlistCancel.reset();
+    state.playlistThumbnailSchedule.reset();
     if (state.playlistRefreshPending && state.settingsWindow &&
         TabCtrl_GetCurSel(state.settingsTabs) == 2) {
         state.playlistRefreshPending = false;
@@ -4099,10 +4111,19 @@ void StartPlaylistRefresh(ResidentState& state) {
         state.playlistThread.join();
     }
 
+    const int initialFirstVisibleRow =
+        std::max(0, ListView_GetTopIndex(state.playlistList));
+    const int initialVisibleRowCount =
+        std::max(1, ListView_GetCountPerPage(state.playlistList));
     ++state.playlistGeneration;
     const std::uint64_t generation = state.playlistGeneration;
     const auto cancellation = std::make_shared<std::atomic_bool>(false);
+    const auto schedule = std::make_shared<PlaylistThumbnailSchedule>();
     state.playlistCancel = cancellation;
+    state.playlistThumbnailSchedule = schedule;
+    state.playlistPriorityFirstVisibleRow = -1;
+    state.playlistPriorityVisibleRowCount = -1;
+    state.playlistRowsApplied = false;
     state.playlistRunning = true;
     state.playlistRefreshPending = false;
     state.playlistSources.clear();
@@ -4124,12 +4145,33 @@ void StartPlaylistRefresh(ResidentState& state) {
     const auto executableDirectory = ExecutableDirectory();
     try {
         state.playlistThread = std::thread(
-            [&state, cancellation, generation, cache, settingsPath, executableDirectory]() {
+            [&state,
+                cancellation,
+                schedule,
+                generation,
+                initialFirstVisibleRow,
+                initialVisibleRowCount,
+                cache,
+                settingsPath,
+                executableDirectory]() {
                 std::wstring failureMessage;
                 try {
                     const auto settings = ReadSettings(settingsPath);
                     const auto sources =
                         FindSourceImages(settings.sourceDirectories, executableDirectory);
+                    {
+                        const auto initialOrder = swc::PlaylistThumbnailPriorityOrder(
+                            sources.size(),
+                            initialFirstVisibleRow,
+                            initialVisibleRowCount);
+                        std::lock_guard<std::mutex> lock(schedule->mutex);
+                        schedule->pending.assign(initialOrder.size(), true);
+                        schedule->pendingRows.insert(
+                            schedule->pendingRows.end(),
+                            initialOrder.begin(),
+                            initialOrder.end());
+                        schedule->rowsReady = true;
+                    }
                     PlaylistRefreshPacket rowsPacket;
                     rowsPacket.kind = PlaylistRefreshPacket::Kind::rows;
                     rowsPacket.generation = generation;
@@ -4183,11 +4225,16 @@ void StartPlaylistRefresh(ResidentState& state) {
                             std::wstring,
                             std::shared_ptr<const PlaylistThumbnail>> generatedThumbnails;
 
-                        for (std::size_t rowIndex = 0;
-                             rowIndex < sources.size();
-                             ++rowIndex) {
-                            if (cancellation->load(std::memory_order_acquire)) {
-                                break;
+                        while (!cancellation->load(std::memory_order_acquire)) {
+                            std::size_t rowIndex = 0;
+                            {
+                                std::lock_guard<std::mutex> lock(schedule->mutex);
+                                if (schedule->pendingRows.empty()) {
+                                    break;
+                                }
+                                rowIndex = schedule->pendingRows.front();
+                                schedule->pendingRows.pop_front();
+                                schedule->pending[rowIndex] = false;
                             }
                             const auto& source = sources[rowIndex];
                             PlaylistRefreshPacket thumbnailPacket;
@@ -4258,6 +4305,8 @@ void StartPlaylistRefresh(ResidentState& state) {
     }
 }
 
+void UpdatePlaylistThumbnailPriorities(ResidentState& state, bool force = false);
+
 void ApplyPlaylistRows(ResidentState& state, PlaylistRefreshPacket& packet) {
     ListView_DeleteAllItems(state.playlistList);
     ImageList_RemoveAll(state.playlistImageList);
@@ -4325,8 +4374,54 @@ void ApplyPlaylistRows(ResidentState& state, PlaylistRefreshPacket& packet) {
     }
     SendMessageW(state.playlistList, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(state.playlistList, nullptr, TRUE);
+    state.playlistRowsApplied = true;
+    UpdatePlaylistThumbnailPriorities(state, true);
     RefreshPlaylistDisplayAssignments(state, packet.settings, true);
     SetPlaylistHint(state, true);
+    UpdatePlaylistThumbnailPriorities(state, true);
+}
+
+void UpdatePlaylistThumbnailPriorities(ResidentState& state, bool force) {
+    const auto schedule = state.playlistThumbnailSchedule;
+    if (!schedule || !state.playlistList || !state.playlistRowsApplied) {
+        return;
+    }
+
+    int firstVisibleRow = ListView_GetTopIndex(state.playlistList);
+    if (firstVisibleRow < 0) {
+        firstVisibleRow = 0;
+    }
+    const int visibleRowCount =
+        std::max(1, ListView_GetCountPerPage(state.playlistList));
+    if (!force &&
+        firstVisibleRow == state.playlistPriorityFirstVisibleRow &&
+        visibleRowCount == state.playlistPriorityVisibleRowCount) {
+        return;
+    }
+
+    const auto order = swc::PlaylistThumbnailPriorityOrder(
+        state.playlistSources.size(),
+        firstVisibleRow,
+        visibleRowCount);
+    {
+        std::lock_guard<std::mutex> lock(schedule->mutex);
+        std::deque<std::size_t> reorderedRows;
+        if (!schedule->rowsReady) {
+            schedule->pending.assign(order.size(), true);
+            reorderedRows.insert(
+                reorderedRows.end(), order.begin(), order.end());
+            schedule->rowsReady = true;
+        } else {
+            for (const std::size_t row : order) {
+                if (row < schedule->pending.size() && schedule->pending[row]) {
+                    reorderedRows.push_back(row);
+                }
+            }
+        }
+        schedule->pendingRows.swap(reorderedRows);
+    }
+    state.playlistPriorityFirstVisibleRow = firstVisibleRow;
+    state.playlistPriorityVisibleRowCount = visibleRowCount;
 }
 
 void ApplyPlaylistThumbnail(
@@ -4400,6 +4495,7 @@ void ProcessPlaylistPackets(ResidentState& state) {
                 state.playlistThread.join();
                 state.playlistRunning = false;
                 state.playlistCancel.reset();
+                state.playlistThumbnailSchedule.reset();
                 if (state.playlistRefreshPending && state.settingsWindow &&
                     TabCtrl_GetCurSel(state.settingsTabs) == 2) {
                     state.playlistRefreshPending = false;
@@ -4425,8 +4521,16 @@ void ProcessPlaylistPackets(ResidentState& state) {
                 }
             }
         } catch (const Failure& failure) {
+            if (packet.kind == PlaylistRefreshPacket::Kind::rows &&
+                state.playlistCancel) {
+                state.playlistCancel->store(true, std::memory_order_release);
+            }
             ShowError(failure.message, state.settingsWindow ? state.settingsWindow : state.window);
         } catch (const std::exception&) {
+            if (packet.kind == PlaylistRefreshPacket::Kind::rows &&
+                state.playlistCancel) {
+                state.playlistCancel->store(true, std::memory_order_release);
+            }
             ShowError(
                 L"Could not update the Playlist display.",
                 state.settingsWindow ? state.settingsWindow : state.window);
@@ -7887,6 +7991,22 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
         if (wParam == kWorkerPollTimerId) {
             CompleteWallpaperChange(*state);
             ProcessPlaylistPackets(*state);
+            if (state->playlistRunning && state->settingsWindow &&
+                TabCtrl_GetCurSel(state->settingsTabs) == 2) {
+                try {
+                    UpdatePlaylistThumbnailPriorities(*state);
+                } catch (const std::exception&) {
+                    CancelPlaylistRefresh(*state);
+                    ShowError(
+                        L"Could not update Playlist thumbnail priorities.",
+                        state->settingsWindow);
+                } catch (...) {
+                    CancelPlaylistRefresh(*state);
+                    ShowError(
+                        L"Could not update Playlist thumbnail priorities.",
+                        state->settingsWindow);
+                }
+            }
             ProcessCountdownTick(*state);
             return 0;
         }

@@ -8,6 +8,26 @@
 
 int main() {
     {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(10, 4, 2);
+        assert((order == std::vector<std::size_t>{4, 5, 3, 6, 2, 7, 1, 8, 0, 9}));
+    }
+
+    {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(5, 0, 2);
+        assert((order == std::vector<std::size_t>{0, 1, 2, 3, 4}));
+    }
+
+    {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(5, 99, 2);
+        assert((order == std::vector<std::size_t>{4, 3, 2, 1, 0}));
+    }
+
+    {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(0, 0, 0);
+        assert(order.empty());
+    }
+
+    {
         std::wistringstream input(
             L"; whole-line comment\n"
             L"source_directories = C:\\Wallpapers ; inline comment\n"

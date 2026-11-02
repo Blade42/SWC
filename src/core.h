@@ -420,6 +420,38 @@ inline PlaylistFileContents ParsePlaylistFile(
     return contents;
 }
 
+inline std::vector<std::size_t> PlaylistThumbnailPriorityOrder(
+    std::size_t rowCount,
+    int firstVisibleRow,
+    int visibleRowCount) {
+    std::vector<std::size_t> order;
+    order.reserve(rowCount);
+    if (rowCount == 0) {
+        return order;
+    }
+
+    const std::size_t first = firstVisibleRow < 0
+        ? 0
+        : std::min(static_cast<std::size_t>(firstVisibleRow), rowCount - 1);
+    const std::size_t visibleCount = visibleRowCount > 0
+        ? static_cast<std::size_t>(visibleRowCount)
+        : 1;
+    const std::size_t last = first + std::min(visibleCount, rowCount - first) - 1;
+
+    for (std::size_t row = first; row <= last; ++row) {
+        order.push_back(row);
+    }
+    for (std::size_t distance = 1; order.size() < rowCount; ++distance) {
+        if (distance <= first && order.size() < rowCount) {
+            order.push_back(first - distance);
+        }
+        if (last + distance < rowCount && order.size() < rowCount) {
+            order.push_back(last + distance);
+        }
+    }
+    return order;
+}
+
 inline bool ParsePercent(
     const std::wstring& value,
     std::uint32_t minimum,
