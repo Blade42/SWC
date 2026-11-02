@@ -1,6 +1,7 @@
 # Generated build outputs; keep the distributable sample settings file.
 /build/*
 !/build/settings.sample.ini
+!/build/simple-wallpaper-changer.exe
 /build-cmake/
 ~$quirements MVP.docx
 *.tmp

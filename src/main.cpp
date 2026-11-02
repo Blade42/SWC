@@ -108,6 +108,7 @@ constexpr int kCountdownHoursLabelId = 2052;
 constexpr int kCountdownMinutesLabelId = 2053;
 constexpr int kCountdownSecondsLabelId = 2054;
 constexpr UINT kSetDisplayCommandBase = 40000;
+constexpr UINT kDeletePlaylistImageCommandId = 1100;
 constexpr int kPlaylistThumbnailSize = 64;
 constexpr std::size_t kPlaylistThumbnailCacheLimit = 512;
 constexpr int kSettingsContentWidth = 968;
@@ -4980,11 +4981,62 @@ void ChooseBackgroundFillColor(ResidentState& state, HWND owner) {
     SaveBackgroundSettings(state, std::move(updated), owner);
 }
 
+void DeletePlaylistImage(
+    ResidentState& state,
+    const std::filesystem::path& imagePath,
+    HWND owner) {
+    const std::wstring message =
+        L"Are you sure you want to delete this image?\r\n\r\n" +
+        imagePath.filename().wstring() +
+        L"\r\n\r\nWindows will move it to the Recycle Bin when possible. "
+        L"If the Recycle Bin is unavailable, it may be permanently deleted.";
+    if (MessageBoxW(
+            owner,
+            message.c_str(),
+            L"Delete Playlist image",
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+
+    std::wstring pathList = imagePath.wstring();
+    pathList.push_back(L'\0');
+    pathList.push_back(L'\0');
+    SHFILEOPSTRUCTW operation{};
+    operation.hwnd = owner;
+    operation.wFunc = FO_DELETE;
+    operation.pFrom = pathList.c_str();
+    operation.fFlags =
+        FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+    const int result = SHFileOperationW(&operation);
+    if (result != 0 || operation.fAnyOperationsAborted) {
+        const DWORD error = result != 0
+            ? static_cast<DWORD>(result)
+            : ERROR_CANCELLED;
+        ShowError(
+            L"Could not delete the Playlist image \"" +
+                imagePath.filename().wstring() + L"\": " +
+                Win32Message(error),
+            owner);
+        return;
+    }
+
+    try {
+        StartPlaylistRefresh(state);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"The image was deleted, but the Playlist could not be refreshed.",
+            owner);
+    }
+}
+
 void ShowPlaylistContextMenu(ResidentState& state, int row) {
     if (row < 0 ||
         static_cast<std::size_t>(row) >= state.playlistSources.size()) {
         return;
     }
+    const auto selectedImagePath =
+        state.playlistSources[static_cast<std::size_t>(row)].path;
 
     HMENU menu = CreatePopupMenu();
     if (!menu) {
@@ -4993,7 +5045,9 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
         return;
     }
     bool populated = true;
-    for (std::size_t index = 0; index < state.playlistDisplays.size(); ++index) {
+    for (std::size_t index = 0;
+         index < state.playlistDisplays.size();
+         ++index) {
         const std::wstring label =
             L"Set as background on " + state.playlistDisplays[index].friendlyName;
         if (!AppendMenuW(
@@ -5005,13 +5059,23 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
             break;
         }
     }
-    if (!populated || state.playlistDisplays.empty()) {
+    if (populated) {
+        if (!state.playlistDisplays.empty()) {
+            populated = AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+        if (populated) {
+            populated = AppendMenuW(
+                menu,
+                MF_STRING,
+                kDeletePlaylistImageCommandId,
+                L"Delete");
+        }
+    }
+    if (!populated) {
         const DWORD error = GetLastError();
         DestroyMenu(menu);
         ShowError(
-            state.playlistDisplays.empty()
-                ? L"No connected displays are available."
-                : L"Could not populate the Playlist menu: " + Win32Message(error),
+            L"Could not populate the Playlist menu: " + Win32Message(error),
             state.settingsWindow);
         return;
     }
@@ -5037,6 +5101,10 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
         nullptr);
     DestroyMenu(menu);
     PostMessageW(state.settingsWindow, WM_NULL, 0, 0);
+    if (command == kDeletePlaylistImageCommandId) {
+        DeletePlaylistImage(state, selectedImagePath, state.settingsWindow);
+        return;
+    }
     if (command >= kSetDisplayCommandBase) {
         const std::size_t displayIndex = command - kSetDisplayCommandBase;
         if (displayIndex < state.playlistDisplays.size()) {
