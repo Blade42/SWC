@@ -19,6 +19,43 @@ struct SourceDirectory {
     bool enabled = true;
 };
 
+inline constexpr std::size_t kMaxRecentPlaylistFiles = 10;
+
+inline bool PlaylistPathsEqual(
+    const std::wstring& left,
+    const std::wstring& right) {
+    return left.size() == right.size() &&
+        std::equal(
+            left.begin(),
+            left.end(),
+            right.begin(),
+            [](wchar_t leftCharacter, wchar_t rightCharacter) {
+                return std::towlower(leftCharacter) ==
+                    std::towlower(rightCharacter);
+            });
+}
+
+inline void RememberPlaylistFile(
+    std::vector<std::wstring>& playlistFiles,
+    std::wstring path) {
+    if (path.empty()) {
+        return;
+    }
+    const auto duplicate = std::find_if(
+        playlistFiles.begin(),
+        playlistFiles.end(),
+        [&](const std::wstring& existing) {
+            return PlaylistPathsEqual(existing, path);
+        });
+    if (duplicate != playlistFiles.end()) {
+        playlistFiles.erase(duplicate);
+    }
+    playlistFiles.insert(playlistFiles.begin(), std::move(path));
+    if (playlistFiles.size() > kMaxRecentPlaylistFiles) {
+        playlistFiles.resize(kMaxRecentPlaylistFiles);
+    }
+}
+
 inline bool operator==(const SourceDirectory& left, const SourceDirectory& right) {
     return left.path == right.path && left.enabled == right.enabled;
 }
@@ -72,8 +109,17 @@ enum class MultiMonitorImageMode {
     separateImages
 };
 
+enum class ImageSourceMode {
+    sourceFolders,
+    playlistFile
+};
+
 struct Settings {
     std::vector<SourceDirectory> sourceDirectories;
+    ImageSourceMode imageSourceMode = ImageSourceMode::sourceFolders;
+    std::wstring playlistFilePath;
+    std::vector<std::wstring> recentPlaylistFiles;
+    bool recentPlaylistHistoryInitialized = false;
     std::vector<DisplayImage> displayImages;
     std::wstring lastImage;
     bool changeOnStart = true;
@@ -349,6 +395,31 @@ inline std::wstring Trim(std::wstring value) {
     return std::wstring(first, last);
 }
 
+struct PlaylistFileContents {
+    std::vector<std::wstring> imagePaths;
+    std::size_t invalidLineCount = 0;
+};
+
+template <typename IsValidImagePath>
+inline PlaylistFileContents ParsePlaylistFile(
+    std::wistream& input,
+    IsValidImagePath isValidImagePath) {
+    PlaylistFileContents contents;
+    std::wstring line;
+    while (std::getline(input, line)) {
+        line = Trim(std::move(line));
+        if (line.empty()) {
+            continue;
+        }
+        if (isValidImagePath(line)) {
+            contents.imagePaths.push_back(std::move(line));
+        } else {
+            ++contents.invalidLineCount;
+        }
+    }
+    return contents;
+}
+
 inline bool ParsePercent(
     const std::wstring& value,
     std::uint32_t minimum,
@@ -414,6 +485,27 @@ inline Settings ParseSettings(std::wistream& input) {
             if (!value.empty()) {
                 settings.sourceDirectories.push_back(ParseSourceDirectory(value));
             }
+        } else if (identifier == L"image_source_mode") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            if (normalized == L"playlist_file") {
+                settings.imageSourceMode = ImageSourceMode::playlistFile;
+            } else if (normalized == L"source_folders") {
+                settings.imageSourceMode = ImageSourceMode::sourceFolders;
+            }
+        } else if (identifier == L"playlist_file") {
+            settings.playlistFilePath = value;
+        } else if (identifier == L"recent_playlist_file") {
+            RememberPlaylistFile(settings.recentPlaylistFiles, value);
+        } else if (identifier == L"recent_playlist_history_initialized") {
+            std::wstring normalized = value;
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+                return static_cast<wchar_t>(std::towlower(ch));
+            });
+            settings.recentPlaylistHistoryInitialized =
+                normalized == L"true";
         } else if (identifier == L"last_image") {
             settings.lastImage = value;
         } else if (identifier == L"display_image") {

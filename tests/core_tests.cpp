@@ -44,6 +44,8 @@ int main() {
         assert(settings.sourceDirectories[3].path == L"C:\\First");
         assert(settings.sourceDirectories[3].enabled);
         assert(swc::SerializeSourceDirectory(settings.sourceDirectories[1]) == L"-D:\\Disabled");
+        assert(settings.imageSourceMode == swc::ImageSourceMode::sourceFolders);
+        assert(settings.playlistFilePath.empty());
         assert(swc::HasEnabledSourceDirectory(settings.sourceDirectories));
         assert(!swc::HasEnabledSourceDirectory({}));
         assert(!swc::HasEnabledSourceDirectory({{L"C:\\First", false}}));
@@ -61,6 +63,73 @@ int main() {
     {
         std::wistringstream input(L"source_directory=C:\\Legacy\n");
         assert(swc::ParseSettings(input).sourceDirectories.empty());
+    }
+
+    {
+        std::wistringstream input(
+            L"image_source_mode=PLAYLIST_FILE\n"
+            L"playlist_file=C:\\Wallpapers\\My playlist.txt\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.imageSourceMode == swc::ImageSourceMode::playlistFile);
+        assert(settings.playlistFilePath ==
+            L"C:\\Wallpapers\\My playlist.txt");
+    }
+
+    {
+        std::wistringstream input(
+            L"recent_playlist_history_initialized=true\n"
+            L"recent_playlist_file=C:\\Wallpapers\\one.txt\n"
+            L"recent_playlist_file=D:\\Wallpapers\\two.txt\n"
+            L"recent_playlist_file=c:\\wallpapers\\ONE.TXT\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.recentPlaylistHistoryInitialized);
+        assert(settings.recentPlaylistFiles.size() == 2);
+        assert(settings.recentPlaylistFiles[0] ==
+            L"c:\\wallpapers\\ONE.TXT");
+        assert(settings.recentPlaylistFiles[1] ==
+            L"D:\\Wallpapers\\two.txt");
+    }
+
+    {
+        std::vector<std::wstring> playlistFiles;
+        for (std::size_t index = 0;
+             index <= swc::kMaxRecentPlaylistFiles;
+             ++index) {
+            swc::RememberPlaylistFile(
+                playlistFiles,
+                L"C:\\Playlists\\" + std::to_wstring(index) + L".txt");
+        }
+        assert(playlistFiles.size() == swc::kMaxRecentPlaylistFiles);
+        assert(playlistFiles.front() == L"C:\\Playlists\\10.txt");
+        assert(playlistFiles.back() == L"C:\\Playlists\\1.txt");
+    }
+
+    {
+        std::wistringstream input(
+            L"image_source_mode=invalid\n"
+            L"playlist_file=\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.imageSourceMode == swc::ImageSourceMode::sourceFolders);
+        assert(settings.playlistFilePath.empty());
+    }
+
+    {
+        std::wistringstream input(
+            L" C:\\Wallpapers\\one.jpg \r\n"
+            L"not an image\n"
+            L"\r\n"
+            L"C:\\Wallpapers\\two.png\n"
+            L"missing.jpg\n");
+        const auto playlist = swc::ParsePlaylistFile(
+            input,
+            [](const std::wstring& row) {
+                return row == L"C:\\Wallpapers\\one.jpg" ||
+                    row == L"C:\\Wallpapers\\two.png";
+            });
+        assert(playlist.imagePaths.size() == 2);
+        assert(playlist.imagePaths[0] == L"C:\\Wallpapers\\one.jpg");
+        assert(playlist.imagePaths[1] == L"C:\\Wallpapers\\two.png");
+        assert(playlist.invalidLineCount == 2);
     }
 
     {
