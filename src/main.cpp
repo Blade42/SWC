@@ -779,6 +779,129 @@ std::wstring EdidMonitorProductName(const std::wstring& devicePath) {
     return swc::ExtractEdidMonitorName(edid);
 }
 
+struct Win32DisplayFallbackContext {
+    const std::vector<std::wstring>* devicePaths = nullptr;
+    std::vector<Display>* displays = nullptr;
+    std::wstring error;
+};
+
+BOOL CALLBACK CollectWin32DisplayFallback(
+    HMONITOR monitorHandle,
+    HDC,
+    LPRECT,
+    LPARAM parameter) {
+    auto* context = reinterpret_cast<Win32DisplayFallbackContext*>(parameter);
+    MONITORINFOEXW monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitorHandle, &monitorInfo)) {
+        context->error = L"Could not read active monitor information: " +
+            Win32Message(GetLastError());
+        return FALSE;
+    }
+
+    bool matchedDevicePath = false;
+    for (DWORD adapterIndex = 0;; ++adapterIndex) {
+        DISPLAY_DEVICEW adapter{};
+        adapter.cb = sizeof(adapter);
+        if (!EnumDisplayDevicesW(nullptr, adapterIndex, &adapter, 0)) {
+            break;
+        }
+        if (!WindowsTextEquals(adapter.DeviceName, monitorInfo.szDevice)) {
+            continue;
+        }
+
+        for (DWORD monitorIndex = 0;; ++monitorIndex) {
+            DISPLAY_DEVICEW physicalMonitor{};
+            physicalMonitor.cb = sizeof(physicalMonitor);
+            if (!EnumDisplayDevicesW(
+                    adapter.DeviceName,
+                    monitorIndex,
+                    &physicalMonitor,
+                    EDD_GET_DEVICE_INTERFACE_NAME)) {
+                break;
+            }
+            const auto path = std::find_if(
+                context->devicePaths->begin(),
+                context->devicePaths->end(),
+                [&](const std::wstring& candidate) {
+                    return WindowsTextEquals(candidate, physicalMonitor.DeviceID);
+                });
+            if (path == context->devicePaths->end()) {
+                continue;
+            }
+
+            const RECT bounds = monitorInfo.rcMonitor;
+            const auto width =
+                static_cast<long long>(bounds.right) - bounds.left;
+            const auto height =
+                static_cast<long long>(bounds.bottom) - bounds.top;
+            if (width <= 0 || height <= 0 ||
+                width > std::numeric_limits<UINT>::max() ||
+                height > std::numeric_limits<UINT>::max()) {
+                context->error = L"Windows returned invalid active monitor dimensions.";
+                return FALSE;
+            }
+            context->displays->push_back({
+                *path,
+                {},
+                bounds.left,
+                bounds.top,
+                static_cast<UINT>(width),
+                static_cast<UINT>(height),
+                (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0});
+            matchedDevicePath = true;
+            break;
+        }
+        break;
+    }
+
+    if (!matchedDevicePath) {
+        context->error =
+            L"Could not match an active monitor to its wallpaper device path.";
+        return FALSE;
+    }
+    return TRUE;
+}
+
+std::vector<Display> ConnectedDisplaysFromWin32(
+    const std::vector<std::wstring>& devicePaths,
+    HRESULT wallpaperBoundsError) {
+    std::vector<Display> displays;
+    Win32DisplayFallbackContext context{
+        &devicePaths, &displays, {}};
+    if (!EnumDisplayMonitors(
+            nullptr,
+            nullptr,
+            CollectWin32DisplayFallback,
+            reinterpret_cast<LPARAM>(&context))) {
+        if (context.error.empty()) {
+            context.error = L"Could not enumerate active monitors: " +
+                Win32Message(GetLastError());
+        }
+        Fail(
+            L"Could not read display dimensions from the wallpaper API (" +
+            HResultText(wallpaperBoundsError) + L"), and "
+            L"Windows display enumeration fallback failed. " + context.error);
+    }
+    if (displays.empty() ||
+        std::none_of(displays.begin(), displays.end(), [](const Display& display) {
+            return display.primary;
+        })) {
+        Fail(
+            L"Could not read display dimensions from the wallpaper API (" +
+            HResultText(wallpaperBoundsError) + L"), and "
+            L"Windows display enumeration did not return a matching display set.");
+    }
+    std::stable_sort(displays.begin(), displays.end(), [](const Display& left, const Display& right) {
+        return left.primary && !right.primary;
+    });
+    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+        displays[displayIndex].friendlyName =
+            swc::FormatDisplayName({}, displayIndex);
+    }
+    return displays;
+}
+
 std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
     UINT count = 0;
     CheckHr(wallpaper->GetMonitorDevicePathCount(&count), L"Could not enumerate displays");
@@ -787,7 +910,11 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
     }
 
     std::vector<Display> displays;
+    std::vector<std::wstring> devicePaths;
     displays.reserve(count);
+    devicePaths.reserve(count);
+    bool useWin32Fallback = false;
+    HRESULT wallpaperBoundsError = S_OK;
     for (UINT index = 0; index < count; ++index) {
         LPWSTR rawDevicePath = nullptr;
         const HRESULT pathResult = wallpaper->GetMonitorDevicePathAt(index, &rawDevicePath);
@@ -796,6 +923,7 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
         if (!devicePath) {
             Fail(L"Windows returned an empty display identifier.");
         }
+        devicePaths.emplace_back(devicePath.get());
 
         RECT rectangle{};
         const HRESULT rectangleResult =
@@ -803,7 +931,11 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
         if (rectangleResult == S_FALSE) {
             continue;
         }
-        CheckHr(rectangleResult, L"Could not read display dimensions");
+        if (FAILED(rectangleResult)) {
+            useWin32Fallback = true;
+            wallpaperBoundsError = rectangleResult;
+            continue;
+        }
         const auto width = static_cast<long long>(rectangle.right) - rectangle.left;
         const auto height = static_cast<long long>(rectangle.bottom) - rectangle.top;
         if (width <= 0 || height <= 0 ||
@@ -821,6 +953,11 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
             static_cast<UINT>(height),
             rectangle.left <= 0 && rectangle.right > 0 &&
                 rectangle.top <= 0 && rectangle.bottom > 0});
+    }
+
+    if (useWin32Fallback) {
+        displays = ConnectedDisplaysFromWin32(
+            devicePaths, wallpaperBoundsError);
     }
 
     if (std::none_of(displays.begin(), displays.end(), [](const Display& display) {
