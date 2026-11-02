@@ -3538,7 +3538,8 @@ void ScrollPlaylistToCurrentImage(const ResidentState& state) {
 
 void RefreshPlaylistDisplayAssignments(
     ResidentState& state,
-    const swc::Settings& settings) {
+    const swc::Settings& settings,
+    bool scrollToCurrentImage = false) {
     auto wallpaper = CreateDesktopWallpaper();
     state.playlistDisplays = ConnectedDisplays(wallpaper.Get());
     state.playlistDisplayNames.assign(state.playlistSources.size(), L"");
@@ -3599,7 +3600,9 @@ void RefreshPlaylistDisplayAssignments(
             3,
             const_cast<wchar_t*>(state.playlistDisplayNames[row].c_str()));
     }
-    ScrollPlaylistToCurrentImage(state);
+    if (scrollToCurrentImage) {
+        ScrollPlaylistToCurrentImage(state);
+    }
     InvalidateRect(state.playlistList, nullptr, TRUE);
 }
 
@@ -3897,7 +3900,7 @@ void ApplyPlaylistRows(ResidentState& state, PlaylistRefreshPacket& packet) {
     }
     SendMessageW(state.playlistList, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(state.playlistList, nullptr, TRUE);
-    RefreshPlaylistDisplayAssignments(state, packet.settings);
+    RefreshPlaylistDisplayAssignments(state, packet.settings, true);
     SetPlaylistHint(state, true);
 }
 
@@ -4981,25 +4984,91 @@ void ChooseBackgroundFillColor(ResidentState& state, HWND owner) {
     SaveBackgroundSettings(state, std::move(updated), owner);
 }
 
-void DeletePlaylistImage(
+std::vector<int> SelectedPlaylistRows(const ResidentState& state) {
+    std::vector<int> rows;
+    for (int row = ListView_GetNextItem(state.playlistList, -1, LVNI_SELECTED);
+         row >= 0;
+         row = ListView_GetNextItem(state.playlistList, row, LVNI_SELECTED)) {
+        if (static_cast<std::size_t>(row) < state.playlistSources.size()) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
+}
+
+int SelectPlaylistRowForAction(ResidentState& state, int row) {
+    if (row < 0 ||
+        static_cast<std::size_t>(row) >= state.playlistSources.size()) {
+        return -1;
+    }
+    if ((ListView_GetItemState(state.playlistList, row, LVIS_SELECTED) &
+            LVIS_SELECTED) == 0) {
+        ListView_SetItemState(
+            state.playlistList, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_SetItemState(
+            state.playlistList,
+            row,
+            LVIS_SELECTED | LVIS_FOCUSED,
+            LVIS_SELECTED | LVIS_FOCUSED);
+    } else {
+        ListView_SetItemState(state.playlistList, -1, 0, LVIS_FOCUSED);
+        ListView_SetItemState(
+            state.playlistList, row, LVIS_FOCUSED, LVIS_FOCUSED);
+    }
+    const auto selectedRows = SelectedPlaylistRows(state);
+    return selectedRows.empty() ? -1 : selectedRows.front();
+}
+
+void RefreshPlaylistAfterDeletion(ResidentState& state, HWND owner) {
+    try {
+        StartPlaylistRefresh(state);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"The Playlist could not be refreshed after deletion.", owner);
+    }
+}
+
+void DeletePlaylistImages(
     ResidentState& state,
-    const std::filesystem::path& imagePath,
+    const std::vector<std::filesystem::path>& imagePaths,
     HWND owner) {
-    const std::wstring message =
-        L"Are you sure you want to delete this image?\r\n\r\n" +
-        imagePath.filename().wstring() +
-        L"\r\n\r\nWindows will move it to the Recycle Bin when possible. "
-        L"If the Recycle Bin is unavailable, it may be permanently deleted.";
+    if (imagePaths.empty()) {
+        return;
+    }
+
+    std::wstring message = L"Are you sure you want to delete ";
+    message += imagePaths.size() == 1
+        ? L"this image?"
+        : std::to_wstring(imagePaths.size()) + L" selected images?";
+    message += L"\r\n\r\n";
+    constexpr std::size_t displayedNamesLimit = 8;
+    for (std::size_t index = 0;
+         index < imagePaths.size() && index < displayedNamesLimit;
+         ++index) {
+        message += imagePaths[index].filename().wstring() + L"\r\n";
+    }
+    if (imagePaths.size() > displayedNamesLimit) {
+        message += L"...and " +
+            std::to_wstring(imagePaths.size() - displayedNamesLimit) +
+            L" more.\r\n";
+    }
+    message +=
+        L"\r\nWindows will move them to the Recycle Bin when possible. "
+        L"If the Recycle Bin is unavailable, they may be permanently deleted.";
     if (MessageBoxW(
             owner,
             message.c_str(),
-            L"Delete Playlist image",
+            L"Delete Playlist images",
             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
         return;
     }
 
-    std::wstring pathList = imagePath.wstring();
-    pathList.push_back(L'\0');
+    std::wstring pathList;
+    for (const auto& imagePath : imagePaths) {
+        pathList += imagePath.wstring();
+        pathList.push_back(L'\0');
+    }
     pathList.push_back(L'\0');
     SHFILEOPSTRUCTW operation{};
     operation.hwnd = owner;
@@ -5013,30 +5082,26 @@ void DeletePlaylistImage(
             ? static_cast<DWORD>(result)
             : ERROR_CANCELLED;
         ShowError(
-            L"Could not delete the Playlist image \"" +
-                imagePath.filename().wstring() + L"\": " +
+            L"Could not delete all selected Playlist images: " +
                 Win32Message(error),
             owner);
-        return;
     }
 
-    try {
-        StartPlaylistRefresh(state);
-    } catch (const Failure& failure) {
-        ShowError(failure.message, owner);
-    } catch (const std::exception&) {
-        ShowError(L"The image was deleted, but the Playlist could not be refreshed.",
-            owner);
-    }
+    RefreshPlaylistAfterDeletion(state, owner);
 }
 
 void ShowPlaylistContextMenu(ResidentState& state, int row) {
-    if (row < 0 ||
-        static_cast<std::size_t>(row) >= state.playlistSources.size()) {
+    const int firstSelectedRow = SelectPlaylistRowForAction(state, row);
+    if (firstSelectedRow < 0) {
         return;
     }
-    const auto selectedImagePath =
-        state.playlistSources[static_cast<std::size_t>(row)].path;
+    const auto selectedRows = SelectedPlaylistRows(state);
+    std::vector<std::filesystem::path> selectedImagePaths;
+    selectedImagePaths.reserve(selectedRows.size());
+    for (const int selectedRow : selectedRows) {
+        selectedImagePaths.push_back(
+            state.playlistSources[static_cast<std::size_t>(selectedRow)].path);
+    }
 
     HMENU menu = CreatePopupMenu();
     if (!menu) {
@@ -5080,8 +5145,6 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
         return;
     }
 
-    ListView_SetItemState(
-        state.playlistList, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     POINT cursor{};
     if (!GetCursorPos(&cursor)) {
         const DWORD error = GetLastError();
@@ -5102,7 +5165,7 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
     DestroyMenu(menu);
     PostMessageW(state.settingsWindow, WM_NULL, 0, 0);
     if (command == kDeletePlaylistImageCommandId) {
-        DeletePlaylistImage(state, selectedImagePath, state.settingsWindow);
+        DeletePlaylistImages(state, selectedImagePaths, state.settingsWindow);
         return;
     }
     if (command >= kSetDisplayCommandBase) {
@@ -5112,7 +5175,8 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
                 state,
                 WallpaperRequest{
                     false,
-                    SourceImageIdentity(state.playlistSources[static_cast<std::size_t>(row)]),
+                    SourceImageIdentity(state.playlistSources[
+                        static_cast<std::size_t>(firstSelectedRow)]),
                     state.playlistDisplays[displayIndex].devicePath});
         }
     }
@@ -5507,7 +5571,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
 
             state->playlistList = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                 28, 186, kSettingsContentWidth, 468, window, kPlaylistListId,
                 state->instance,
                 state->settingsFont);
@@ -5767,12 +5831,13 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             if (notification->hwndFrom == state->playlistList) {
                 if (notification->code == LVN_BEGINDRAG) {
                     const auto* drag = reinterpret_cast<const NMLISTVIEW*>(lParam);
-                    if (drag->iItem >= 0 &&
-                        static_cast<std::size_t>(drag->iItem) <
-                            state->playlistSources.size()) {
+                    const int firstSelectedRow =
+                        SelectPlaylistRowForAction(*state, drag->iItem);
+                    if (firstSelectedRow >= 0) {
                         state->draggingPlaylistImage = SourceImageIdentity(
-                            state->playlistSources[static_cast<std::size_t>(drag->iItem)]);
-                        state->draggingPlaylistRow = drag->iItem;
+                            state->playlistSources[
+                                static_cast<std::size_t>(firstSelectedRow)]);
+                        state->draggingPlaylistRow = firstSelectedRow;
                         state->monitorDropTarget = -1;
                         InvalidateRect(state->playlistList, nullptr, TRUE);
                         try {
@@ -5791,16 +5856,16 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 if (notification->code == NM_DBLCLK) {
                     const auto* activation =
                         reinterpret_cast<const NMITEMACTIVATE*>(lParam);
-                    if (activation->iItem >= 0 &&
-                        static_cast<std::size_t>(activation->iItem) <
-                            state->playlistSources.size()) {
+                    const int firstSelectedRow =
+                        SelectPlaylistRowForAction(*state, activation->iItem);
+                    if (firstSelectedRow >= 0) {
                         StartWallpaperChange(
                             *state,
                             WallpaperRequest{
                                 false,
                                 SourceImageIdentity(
                                     state->playlistSources[
-                                        static_cast<std::size_t>(activation->iItem)]),
+                                        static_cast<std::size_t>(firstSelectedRow)]),
                                 {}});
                     }
                     return 0;
