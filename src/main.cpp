@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cwctype>
@@ -27,6 +28,7 @@
 #include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -49,6 +51,10 @@ constexpr UINT kNextCommandId = 1001;
 constexpr UINT kPreviousCommandId = 1002;
 constexpr UINT kExitCommandId = 1003;
 constexpr UINT kSettingsCommandId = 1004;
+constexpr UINT kStartCountdownCommandId = 1005;
+constexpr UINT kStopCountdownCommandId = 1006;
+constexpr UINT kPauseCountdownCommandId = 1007;
+constexpr UINT kResumeCountdownCommandId = 1008;
 constexpr UINT_PTR kWorkerPollTimerId = 1;
 constexpr int kSettingsTabsId = 2001;
 constexpr int kChangeOnStartCheckboxId = 2002;
@@ -62,6 +68,7 @@ constexpr int kPlaylistHintId = 2009;
 constexpr int kMonitorPreviewPanelId = 2010;
 constexpr int kExitSettingsButtonId = 2011;
 constexpr int kOpenWindowOnStartCheckboxId = 2012;
+constexpr int kStartWithWindowsCheckboxId = 2034;
 constexpr int kBackgroundFillColorModeRadioId = 2013;
 constexpr int kBackgroundFillColorButtonId = 2014;
 constexpr int kBackgroundFillModeLabelId = 2015;
@@ -83,7 +90,39 @@ constexpr int kImageLargeCenteredRadioId = 2030;
 constexpr int kImageLargeFillRadioId = 2031;
 constexpr int kImageLargeFitRadioId = 2032;
 constexpr int kImageResizeToPercentUnitLabelId = 2033;
+constexpr int kSameImageOnDisplaysRadioId = 2035;
+constexpr int kSeparateImagesOnDisplaysRadioId = 2036;
+constexpr int kMultiMonitorSettingsGroupId = 2037;
+constexpr int kImagePlacementGroupId = 2038;
+constexpr int kCountdownEnabledCheckboxId = 2040;
+constexpr int kCountdownHoursEditId = 2041;
+constexpr int kCountdownMinutesEditId = 2042;
+constexpr int kCountdownSecondsEditId = 2043;
+constexpr int kCountdownPreviousButtonId = 2044;
+constexpr int kCountdownStartStopButtonId = 2045;
+constexpr int kCountdownPauseResumeButtonId = 2046;
+constexpr int kCountdownRestartButtonId = 2047;
+constexpr int kCountdownNextButtonId = 2048;
+constexpr int kCountdownDurationGroupId = 2049;
+constexpr int kCountdownDisplayId = 2051;
+constexpr int kCountdownHoursLabelId = 2052;
+constexpr int kCountdownMinutesLabelId = 2053;
+constexpr int kCountdownSecondsLabelId = 2054;
+constexpr int kSourceFoldersModeRadioId = 2060;
+constexpr int kPlaylistFileModeRadioId = 2061;
+constexpr int kNewPlaylistFileButtonId = 2063;
+constexpr int kOpenPlaylistFileButtonId = 2064;
+constexpr int kSaveAsPlaylistFileButtonId = 2065;
+constexpr int kSourceListGroupId = 2066;
+constexpr int kPlaylistAddFilesButtonId = 2067;
+constexpr int kPlaylistAddFolderButtonId = 2068;
+constexpr int kPlaylistRemoveButtonId = 2069;
+constexpr int kPlaylistDeleteButtonId = 2070;
+constexpr int kPlaylistRemoveDuplicatesButtonId = 2071;
 constexpr UINT kSetDisplayCommandBase = 40000;
+constexpr UINT kDeletePlaylistImageCommandId = 1100;
+constexpr UINT kRemovePlaylistEntriesCommandId = 1101;
+constexpr UINT kDeletePlaylistEntriesCommandId = 1102;
 constexpr int kPlaylistThumbnailSize = 64;
 constexpr std::size_t kPlaylistThumbnailCacheLimit = 512;
 constexpr int kSettingsContentWidth = 968;
@@ -215,6 +254,84 @@ std::filesystem::path ExecutablePath() {
             Fail(L"The executable path is too long.");
         }
         buffer.resize(std::min<std::size_t>(buffer.size() * 2, 32768));
+    }
+}
+
+void SetStartWithWindows(bool enabled) {
+    constexpr wchar_t runKeyPath[] =
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    constexpr wchar_t valueName[] = L"Simple Wallpaper Changer";
+    HKEY key = nullptr;
+
+    if (enabled) {
+        DWORD disposition = 0;
+        const LSTATUS openResult = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            runKeyPath,
+            0,
+            nullptr,
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            nullptr,
+            &key,
+            &disposition);
+        if (openResult != ERROR_SUCCESS) {
+            FailWin32(L"Could not open the current-user startup registry key", openResult);
+        }
+
+        struct RegistryKeyCloser {
+            HKEY value;
+            ~RegistryKeyCloser() {
+                if (value) {
+                    RegCloseKey(value);
+                }
+            }
+        } closer{key};
+
+        const std::wstring command = L"\"" + ExecutablePath().wstring() + L"\"";
+        const std::uint64_t byteCount =
+            (static_cast<std::uint64_t>(command.size()) + 1) * sizeof(wchar_t);
+        if (byteCount > std::numeric_limits<DWORD>::max()) {
+            Fail(L"The executable path is too long to register for Windows startup.");
+        }
+        const LSTATUS setResult = RegSetValueExW(
+            key,
+            valueName,
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(command.c_str()),
+            static_cast<DWORD>(byteCount));
+        if (setResult != ERROR_SUCCESS) {
+            FailWin32(L"Could not register the program to start with Windows", setResult);
+        }
+        return;
+    }
+
+    const LSTATUS openResult = RegOpenKeyExW(
+        HKEY_CURRENT_USER,
+        runKeyPath,
+        0,
+        KEY_SET_VALUE,
+        &key);
+    if (openResult == ERROR_FILE_NOT_FOUND) {
+        return;
+    }
+    if (openResult != ERROR_SUCCESS) {
+        FailWin32(L"Could not open the current-user startup registry key", openResult);
+    }
+
+    struct RegistryKeyCloser {
+        HKEY value;
+        ~RegistryKeyCloser() {
+            if (value) {
+                RegCloseKey(value);
+            }
+        }
+    } closer{key};
+
+    const LSTATUS deleteResult = RegDeleteValueW(key, valueName);
+    if (deleteResult != ERROR_SUCCESS && deleteResult != ERROR_FILE_NOT_FOUND) {
+        FailWin32(L"Could not remove the program from Windows startup", deleteResult);
     }
 }
 
@@ -677,6 +794,129 @@ std::wstring EdidMonitorProductName(const std::wstring& devicePath) {
     return swc::ExtractEdidMonitorName(edid);
 }
 
+struct Win32DisplayFallbackContext {
+    const std::vector<std::wstring>* devicePaths = nullptr;
+    std::vector<Display>* displays = nullptr;
+    std::wstring error;
+};
+
+BOOL CALLBACK CollectWin32DisplayFallback(
+    HMONITOR monitorHandle,
+    HDC,
+    LPRECT,
+    LPARAM parameter) {
+    auto* context = reinterpret_cast<Win32DisplayFallbackContext*>(parameter);
+    MONITORINFOEXW monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitorHandle, &monitorInfo)) {
+        context->error = L"Could not read active monitor information: " +
+            Win32Message(GetLastError());
+        return FALSE;
+    }
+
+    bool matchedDevicePath = false;
+    for (DWORD adapterIndex = 0;; ++adapterIndex) {
+        DISPLAY_DEVICEW adapter{};
+        adapter.cb = sizeof(adapter);
+        if (!EnumDisplayDevicesW(nullptr, adapterIndex, &adapter, 0)) {
+            break;
+        }
+        if (!WindowsTextEquals(adapter.DeviceName, monitorInfo.szDevice)) {
+            continue;
+        }
+
+        for (DWORD monitorIndex = 0;; ++monitorIndex) {
+            DISPLAY_DEVICEW physicalMonitor{};
+            physicalMonitor.cb = sizeof(physicalMonitor);
+            if (!EnumDisplayDevicesW(
+                    adapter.DeviceName,
+                    monitorIndex,
+                    &physicalMonitor,
+                    EDD_GET_DEVICE_INTERFACE_NAME)) {
+                break;
+            }
+            const auto path = std::find_if(
+                context->devicePaths->begin(),
+                context->devicePaths->end(),
+                [&](const std::wstring& candidate) {
+                    return WindowsTextEquals(candidate, physicalMonitor.DeviceID);
+                });
+            if (path == context->devicePaths->end()) {
+                continue;
+            }
+
+            const RECT bounds = monitorInfo.rcMonitor;
+            const auto width =
+                static_cast<long long>(bounds.right) - bounds.left;
+            const auto height =
+                static_cast<long long>(bounds.bottom) - bounds.top;
+            if (width <= 0 || height <= 0 ||
+                width > std::numeric_limits<UINT>::max() ||
+                height > std::numeric_limits<UINT>::max()) {
+                context->error = L"Windows returned invalid active monitor dimensions.";
+                return FALSE;
+            }
+            context->displays->push_back({
+                *path,
+                {},
+                bounds.left,
+                bounds.top,
+                static_cast<UINT>(width),
+                static_cast<UINT>(height),
+                (monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0});
+            matchedDevicePath = true;
+            break;
+        }
+        break;
+    }
+
+    if (!matchedDevicePath) {
+        context->error =
+            L"Could not match an active monitor to its wallpaper device path.";
+        return FALSE;
+    }
+    return TRUE;
+}
+
+std::vector<Display> ConnectedDisplaysFromWin32(
+    const std::vector<std::wstring>& devicePaths,
+    HRESULT wallpaperBoundsError) {
+    std::vector<Display> displays;
+    Win32DisplayFallbackContext context{
+        &devicePaths, &displays, {}};
+    if (!EnumDisplayMonitors(
+            nullptr,
+            nullptr,
+            CollectWin32DisplayFallback,
+            reinterpret_cast<LPARAM>(&context))) {
+        if (context.error.empty()) {
+            context.error = L"Could not enumerate active monitors: " +
+                Win32Message(GetLastError());
+        }
+        Fail(
+            L"Could not read display dimensions from the wallpaper API (" +
+            HResultText(wallpaperBoundsError) + L"), and "
+            L"Windows display enumeration fallback failed. " + context.error);
+    }
+    if (displays.empty() ||
+        std::none_of(displays.begin(), displays.end(), [](const Display& display) {
+            return display.primary;
+        })) {
+        Fail(
+            L"Could not read display dimensions from the wallpaper API (" +
+            HResultText(wallpaperBoundsError) + L"), and "
+            L"Windows display enumeration did not return a matching display set.");
+    }
+    std::stable_sort(displays.begin(), displays.end(), [](const Display& left, const Display& right) {
+        return left.primary && !right.primary;
+    });
+    for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+        displays[displayIndex].friendlyName =
+            swc::FormatDisplayName({}, displayIndex);
+    }
+    return displays;
+}
+
 std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
     UINT count = 0;
     CheckHr(wallpaper->GetMonitorDevicePathCount(&count), L"Could not enumerate displays");
@@ -685,7 +925,11 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
     }
 
     std::vector<Display> displays;
+    std::vector<std::wstring> devicePaths;
     displays.reserve(count);
+    devicePaths.reserve(count);
+    bool useWin32Fallback = false;
+    HRESULT wallpaperBoundsError = S_OK;
     for (UINT index = 0; index < count; ++index) {
         LPWSTR rawDevicePath = nullptr;
         const HRESULT pathResult = wallpaper->GetMonitorDevicePathAt(index, &rawDevicePath);
@@ -694,6 +938,7 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
         if (!devicePath) {
             Fail(L"Windows returned an empty display identifier.");
         }
+        devicePaths.emplace_back(devicePath.get());
 
         RECT rectangle{};
         const HRESULT rectangleResult =
@@ -701,7 +946,11 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
         if (rectangleResult == S_FALSE) {
             continue;
         }
-        CheckHr(rectangleResult, L"Could not read display dimensions");
+        if (FAILED(rectangleResult)) {
+            useWin32Fallback = true;
+            wallpaperBoundsError = rectangleResult;
+            continue;
+        }
         const auto width = static_cast<long long>(rectangle.right) - rectangle.left;
         const auto height = static_cast<long long>(rectangle.bottom) - rectangle.top;
         if (width <= 0 || height <= 0 ||
@@ -719,6 +968,11 @@ std::vector<Display> ConnectedDisplays(IDesktopWallpaper* wallpaper) {
             static_cast<UINT>(height),
             rectangle.left <= 0 && rectangle.right > 0 &&
                 rectangle.top <= 0 && rectangle.bottom > 0});
+    }
+
+    if (useWin32Fallback) {
+        displays = ConnectedDisplaysFromWin32(
+            devicePaths, wallpaperBoundsError);
     }
 
     if (std::none_of(displays.begin(), displays.end(), [](const Display& display) {
@@ -1475,6 +1729,29 @@ void WriteSettingsFile(
         contents += L"source_directories=" + swc::SerializeSourceDirectory(directory) + L"\r\n";
     }
     contents +=
+        L"; Image source mode: source_folders or playlist_file.\r\n"
+        L"image_source_mode=" +
+        std::wstring(
+            settings.imageSourceMode == swc::ImageSourceMode::playlistFile
+                ? L"playlist_file"
+                : L"source_folders") + L"\r\n"
+        L"; Last used playlist file; relative paths use the executable folder.\r\n"
+        L"playlist_file=" + settings.playlistFilePath + L"\r\n"
+        L"; Last folder used to add images to the Playlist; maintained automatically.\r\n"
+        L"last_playlist_import_folder=" + settings.lastPlaylistImportFolder + L"\r\n"
+        L"; Recent playlist files, newest first; up to 10 entries.\r\n";
+    contents += L"recent_playlist_history_initialized=" +
+        std::wstring(
+            settings.recentPlaylistHistoryInitialized ? L"true" : L"false") +
+        L"\r\n";
+    for (std::size_t index = 0;
+         index < settings.recentPlaylistFiles.size() &&
+         index < swc::kMaxRecentPlaylistFiles;
+         ++index) {
+        const auto& playlistFile = settings.recentPlaylistFiles[index];
+        contents += L"recent_playlist_file=" + playlistFile + L"\r\n";
+    }
+    contents +=
         L"; Last image identity; maintained automatically by the program.\r\n"
         L"last_image=" + settings.lastImage + L"\r\n" +
         L"; Current source image per display; maintained automatically by the program.\r\n";
@@ -1489,6 +1766,9 @@ void WriteSettingsFile(
         L"; Open the Settings window when the program starts: true or false.\r\n";
     contents += L"open_window_on_start=" +
         std::wstring(settings.openWindowOnStart ? L"true" : L"false") + L"\r\n"
+        L"; Start the program automatically with the current Windows user: true or false.\r\n";
+    contents += L"start_with_windows=" +
+        std::wstring(settings.startWithWindows ? L"true" : L"false") + L"\r\n"
         L"; Settings window position and size (left,top,width,height); maintained automatically.\r\n";
     if (settings.hasWindowBounds) {
         contents += L"settings_window_bounds=" +
@@ -1538,6 +1818,18 @@ void WriteSettingsFile(
                 : settings.largeImageMode == swc::LargeImageMode::fill
                 ? L"fill"
                 : L"fit") + L"\r\n"
+        L"; Multi-monitor source selection: same_image or separate_images.\r\n"
+        L"multi_monitor_image_mode=" +
+        std::wstring(
+            settings.multiMonitorImageMode == swc::MultiMonitorImageMode::sameImage
+                ? L"same_image"
+                : L"separate_images") + L"\r\n"
+        L"; Timed wallpaper changes: enabled, hours, minutes, seconds.\r\n"
+        L"countdown_enabled=" +
+        std::wstring(settings.countdownEnabled ? L"true" : L"false") + L"\r\n"
+        L"countdown_hours=" + std::to_wstring(settings.countdownHours) + L"\r\n"
+        L"countdown_minutes=" + std::to_wstring(settings.countdownMinutes) + L"\r\n"
+        L"countdown_seconds=" + std::to_wstring(settings.countdownSeconds) + L"\r\n"
         L"; Example configuration:\r\n"
         L"; source_directories=C:\\Users\\Example\\Pictures\\Wallpapers\r\n"
         L"; source_directories=-D:\\SeasonalWallpapers\r\n"
@@ -1574,6 +1866,217 @@ void WriteSettingsFile(
     }
 }
 
+swc::PlaylistFileContents ReadPlaylistFile(
+    const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        Fail(L"Could not read the playlist file \"" + path.wstring() + L"\".");
+    }
+    const std::string bytes(
+        (std::istreambuf_iterator<char>(file)),
+        std::istreambuf_iterator<char>());
+    if (file.bad()) {
+        Fail(L"An error occurred while reading the playlist file \"" +
+            path.wstring() + L"\".");
+    }
+
+    std::wstring text;
+    if (bytes.size() >= 2 &&
+        static_cast<unsigned char>(bytes[0]) == 0xFF &&
+        static_cast<unsigned char>(bytes[1]) == 0xFE) {
+        if ((bytes.size() - 2) % 2 != 0) {
+            Fail(L"The playlist file has an incomplete UTF-16 character.");
+        }
+        text.reserve((bytes.size() - 2) / 2);
+        for (std::size_t offset = 2; offset < bytes.size(); offset += 2) {
+            text.push_back(static_cast<wchar_t>(
+                static_cast<unsigned char>(bytes[offset]) |
+                (static_cast<unsigned char>(bytes[offset + 1]) << 8)));
+        }
+    } else if (bytes.size() >= 2 &&
+        static_cast<unsigned char>(bytes[0]) == 0xFE &&
+        static_cast<unsigned char>(bytes[1]) == 0xFF) {
+        if ((bytes.size() - 2) % 2 != 0) {
+            Fail(L"The playlist file has an incomplete UTF-16 character.");
+        }
+        text.reserve((bytes.size() - 2) / 2);
+        for (std::size_t offset = 2; offset < bytes.size(); offset += 2) {
+            text.push_back(static_cast<wchar_t>(
+                (static_cast<unsigned char>(bytes[offset]) << 8) |
+                static_cast<unsigned char>(bytes[offset + 1])));
+        }
+    } else {
+        text = Utf8ToWide(bytes);
+        if (!text.empty() && text.front() == 0xFEFF) {
+            text.erase(text.begin());
+        }
+    }
+
+    std::wistringstream input(text);
+    return swc::ParsePlaylistFile(
+        input,
+        [](const std::wstring& row) {
+            const std::filesystem::path imagePath(row);
+            if (!imagePath.is_absolute() ||
+                !swc::IsSupportedExtension(imagePath.extension().wstring())) {
+                return false;
+            }
+            std::error_code error;
+            const bool regularFile =
+                std::filesystem::is_regular_file(imagePath, error);
+            return regularFile && !error;
+        });
+}
+
+std::filesystem::path CreatePlaylistTemporaryPath(
+    const std::filesystem::path& path) {
+    for (unsigned int attempt = 0; attempt < 100; ++attempt) {
+        const auto temporary = std::filesystem::path(
+            path.wstring() + L".swc-" +
+            std::to_wstring(GetCurrentProcessId()) + L"-" +
+            std::to_wstring(attempt) + L".tmp");
+        HANDLE file = CreateFileW(
+            temporary.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_TEMPORARY,
+            nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            CloseHandle(file);
+            return temporary;
+        }
+        const DWORD error = GetLastError();
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+            FailWin32(L"Could not create a temporary playlist file", error);
+        }
+    }
+    Fail(L"Could not create a unique temporary playlist file.");
+}
+
+void WritePlaylistFile(
+    const std::filesystem::path& path,
+    const std::vector<std::wstring>& imagePaths) {
+    std::wstring contents;
+    for (const auto& imagePath : imagePaths) {
+        contents += imagePath + L"\r\n";
+    }
+    const std::string bytes = WideToUtf8(contents);
+    const auto temporary = CreatePlaylistTemporaryPath(path);
+    struct TemporaryPlaylistFile {
+        const std::filesystem::path& path;
+        ~TemporaryPlaylistFile() {
+            DeleteFileW(path.c_str());
+        }
+    } temporaryFile{temporary};
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            Fail(L"Could not write the temporary playlist file.");
+        }
+        file.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        file.flush();
+        if (!file) {
+            Fail(L"An error occurred while writing the playlist file \"" +
+                path.wstring() + L"\".");
+        }
+    }
+    if (!MoveFileExW(
+            temporary.c_str(),
+            path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        FailWin32(L"Could not save the playlist file \"" + path.wstring() + L"\"");
+    }
+}
+
+std::filesystem::path InitializePlaylistFilePath(
+    const swc::Settings& settings,
+    const std::filesystem::path& executableDirectory) {
+    std::filesystem::path configuredPath(settings.playlistFilePath);
+    if (!configuredPath.empty() && configuredPath.is_relative()) {
+        configuredPath = executableDirectory / configuredPath;
+    }
+    std::error_code error;
+    if (!configuredPath.empty()) {
+        const bool configuredExists =
+            std::filesystem::exists(configuredPath, error);
+        if (error) {
+            Fail(L"Could not inspect the configured playlist file: " +
+                FilesystemErrorText(error));
+        }
+        if (configuredExists &&
+            std::filesystem::is_regular_file(configuredPath, error) && !error) {
+            const auto absolutePath =
+                std::filesystem::absolute(configuredPath, error);
+            if (error) {
+                Fail(L"Could not resolve the configured playlist file: " +
+                    FilesystemErrorText(error));
+            }
+            return absolutePath;
+        }
+        if (error) {
+            Fail(L"Could not inspect the configured playlist file: " +
+                FilesystemErrorText(error));
+        }
+    }
+
+    const auto fallbackPath = executableDirectory / L"New Playlist.txt";
+    error.clear();
+    const bool fallbackExists = std::filesystem::exists(fallbackPath, error);
+    if (error) {
+        Fail(L"Could not inspect the fallback playlist file: " +
+            FilesystemErrorText(error));
+    }
+    if (!fallbackExists) {
+        WritePlaylistFile(fallbackPath, {});
+    } else if (!std::filesystem::is_regular_file(fallbackPath, error) || error) {
+        Fail(L"The fallback playlist path is not a regular file.");
+    }
+    const auto absoluteFallbackPath =
+        std::filesystem::absolute(fallbackPath, error);
+    if (error) {
+        Fail(L"Could not resolve the fallback playlist file: " +
+            FilesystemErrorText(error));
+    }
+    return absoluteFallbackPath;
+}
+
+void NormalizeRecentPlaylistPaths(
+    swc::Settings& settings,
+    const std::filesystem::path& executableDirectory) {
+    std::vector<std::wstring> normalizedPaths;
+    normalizedPaths.reserve(std::min(
+        settings.recentPlaylistFiles.size(),
+        swc::kMaxRecentPlaylistFiles));
+    for (const auto& entry : settings.recentPlaylistFiles) {
+        std::filesystem::path path(entry);
+        if (path.is_relative()) {
+            path = executableDirectory / path;
+        }
+        std::error_code error;
+        path = std::filesystem::absolute(path, error);
+        if (error) {
+            Fail(L"Could not resolve a recent playlist file path: " +
+                FilesystemErrorText(error));
+        }
+        const auto absolutePath = path.wstring();
+        const bool duplicate = std::any_of(
+            normalizedPaths.begin(),
+            normalizedPaths.end(),
+            [&](const std::wstring& existing) {
+                return swc::PlaylistPathsEqual(existing, absolutePath);
+            });
+        if (!duplicate) {
+            normalizedPaths.push_back(absolutePath);
+            if (normalizedPaths.size() == swc::kMaxRecentPlaylistFiles) {
+                break;
+            }
+        }
+    }
+    settings.recentPlaylistFiles = std::move(normalizedPaths);
+}
+
 void InitializeSettingsFile(const std::filesystem::path& path) {
     std::lock_guard<std::mutex> lock(gSettingsMutex);
     std::error_code error;
@@ -1592,8 +2095,15 @@ void UpdateUserSettings(
     std::lock_guard<std::mutex> lock(gSettingsMutex);
     auto settings = ReadSettingsFile(path);
     settings.sourceDirectories = preferences.sourceDirectories;
+    settings.imageSourceMode = preferences.imageSourceMode;
+    settings.playlistFilePath = preferences.playlistFilePath;
+    settings.lastPlaylistImportFolder = preferences.lastPlaylistImportFolder;
+    settings.recentPlaylistFiles = preferences.recentPlaylistFiles;
+    settings.recentPlaylistHistoryInitialized =
+        preferences.recentPlaylistHistoryInitialized;
     settings.changeOnStart = preferences.changeOnStart;
     settings.openWindowOnStart = preferences.openWindowOnStart;
+    settings.startWithWindows = preferences.startWithWindows;
     settings.backgroundFillMode = preferences.backgroundFillMode;
     settings.backgroundFillColor = preferences.backgroundFillColor;
     settings.imageSizingMode = preferences.imageSizingMode;
@@ -1601,6 +2111,20 @@ void UpdateUserSettings(
     settings.smallImageMode = preferences.smallImageMode;
     settings.maxSmallImageEnlargePercent = preferences.maxSmallImageEnlargePercent;
     settings.largeImageMode = preferences.largeImageMode;
+    settings.multiMonitorImageMode = preferences.multiMonitorImageMode;
+    settings.countdownEnabled = preferences.countdownEnabled;
+    settings.countdownHours = preferences.countdownHours;
+    settings.countdownMinutes = preferences.countdownMinutes;
+    settings.countdownSeconds = preferences.countdownSeconds;
+    WriteSettingsFile(path, settings);
+}
+
+void UpdateLastPlaylistImportFolder(
+    const std::filesystem::path& path,
+    const std::wstring& directory) {
+    std::lock_guard<std::mutex> lock(gSettingsMutex);
+    auto settings = ReadSettingsFile(path);
+    settings.lastPlaylistImportFolder = directory;
     WriteSettingsFile(path, settings);
 }
 
@@ -1652,17 +2176,32 @@ struct WallpaperRequest {
     std::wstring firstImage;
     std::wstring displayDevicePath;
     bool reapplyCurrent = false;
+    bool reapplyMultiMonitorMode = false;
 };
 
 void Run(const WallpaperRequest& request) {
     const auto executableDirectory = ExecutableDirectory();
     const auto settingsPath = executableDirectory / L"settings.ini";
     const auto settings = ReadSettings(settingsPath);
-    const auto images = request.reapplyCurrent
-        ? std::vector<SourceImage>{}
-        : FindSourceImages(settings.sourceDirectories, executableDirectory);
+    std::vector<SourceImage> images;
+    if (!request.reapplyCurrent || request.reapplyMultiMonitorMode) {
+        if (settings.imageSourceMode == swc::ImageSourceMode::playlistFile) {
+            const auto playlist =
+                ReadPlaylistFile(settings.playlistFilePath);
+            images.reserve(playlist.imagePaths.size());
+            for (const auto& imagePath : playlist.imagePaths) {
+                images.push_back({std::filesystem::path(imagePath), 0});
+            }
+        } else {
+            images = FindSourceImages(
+                settings.sourceDirectories, executableDirectory);
+        }
+    }
     if (images.empty() && !request.reapplyCurrent) {
         return;
+    }
+    if (images.empty() && request.reapplyMultiMonitorMode) {
+        Fail(L"Could not reapply the multi-monitor setting because no source images are available.");
     }
 
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -1731,7 +2270,7 @@ void Run(const WallpaperRequest& request) {
         }
     } temporaryFiles{temporaryPaths};
 
-    if (request.reapplyCurrent) {
+    if (request.reapplyCurrent && !request.reapplyMultiMonitorMode) {
         const std::wstring refreshId = std::to_wstring(GetTickCount64());
         for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
             const auto current = std::find_if(
@@ -1782,6 +2321,192 @@ void Run(const WallpaperRequest& request) {
         return;
     }
 
+    if (request.reapplyCurrent && request.reapplyMultiMonitorMode) {
+        const auto findImageIndex = [&](const std::wstring& imagePath) {
+            for (std::size_t index = 0; index < images.size(); ++index) {
+                const std::wstring path = images[index].path.wstring();
+                if (CompareStringOrdinal(
+                        path.data(),
+                        static_cast<int>(path.size()),
+                        imagePath.data(),
+                        static_cast<int>(imagePath.size()),
+                        TRUE) == CSTR_EQUAL) {
+                    return index;
+                }
+            }
+            return images.size();
+        };
+        const auto currentDisplayImage = [&](std::size_t displayIndex) {
+            const auto current = std::find_if(
+                settings.displayImages.begin(),
+                settings.displayImages.end(),
+                [&](const swc::DisplayImage& item) {
+                    return CompareStringOrdinal(
+                        item.devicePath.data(),
+                        static_cast<int>(item.devicePath.size()),
+                        displays[displayIndex].devicePath.data(),
+                        static_cast<int>(displays[displayIndex].devicePath.size()),
+                        TRUE) == CSTR_EQUAL;
+                });
+            return current == settings.displayImages.end()
+                ? images.size()
+                : findImageIndex(current->imagePath);
+        };
+
+        const std::wstring refreshId = std::to_wstring(GetTickCount64());
+        for (std::size_t displayIndex = 0; displayIndex < displays.size(); ++displayIndex) {
+            const auto& basePath = outputPaths[displayIndex];
+            outputPaths[displayIndex] = basePath.parent_path() /
+                (basePath.stem().wstring() + L"-reapply-" + refreshId +
+                    basePath.extension().wstring());
+            temporaryPaths[displayIndex] = outputPaths[displayIndex].wstring() + L".tmp";
+        }
+
+        std::vector<std::size_t> selectedImages(displays.size(), images.size());
+        if (settings.multiMonitorImageMode == swc::MultiMonitorImageMode::sameImage) {
+            std::size_t currentImage = displays.empty()
+                ? images.size()
+                : currentDisplayImage(0);
+            if (currentImage == images.size()) {
+                const auto cursor = std::find(names.begin(), names.end(), savedCursor);
+                currentImage = cursor == names.end()
+                    ? 0
+                    : static_cast<std::size_t>(cursor - names.begin());
+            }
+
+            std::wstring lastFailure;
+            bool rendered = false;
+            for (const std::size_t candidate :
+                 swc::CandidateAttemptOrderFrom(names, names[currentImage])) {
+                try {
+                    for (std::size_t displayIndex = 0;
+                         displayIndex < displays.size();
+                         ++displayIndex) {
+                        CreateBackgroundPng(
+                            factory.Get(),
+                            images[candidate].path,
+                            displays[displayIndex].width,
+                            displays[displayIndex].height,
+                            temporaryPaths[displayIndex],
+                            settings);
+                    }
+                    std::fill(
+                        selectedImages.begin(), selectedImages.end(), candidate);
+                    rendered = true;
+                    break;
+                } catch (const Failure& failure) {
+                    lastFailure = failure.message;
+                    for (const auto& path : temporaryPaths) {
+                        DeleteFileW(path.c_str());
+                    }
+                }
+            }
+            if (!rendered && !displays.empty()) {
+                Fail(lastFailure.empty()
+                    ? L"No usable image could be processed for all displays."
+                    : L"No usable image could be processed for all displays.\r\n\r\n" +
+                        lastFailure);
+            }
+        } else {
+            bool hasCompleteAssignments = !displays.empty();
+            bool hasDifferentImages = false;
+            for (std::size_t displayIndex = 0;
+                 displayIndex < displays.size();
+                 ++displayIndex) {
+                selectedImages[displayIndex] = currentDisplayImage(displayIndex);
+                if (selectedImages[displayIndex] == images.size()) {
+                    hasCompleteAssignments = false;
+                    break;
+                }
+                if (displayIndex != 0 &&
+                    selectedImages[displayIndex] != selectedImages[0]) {
+                    hasDifferentImages = true;
+                }
+            }
+
+            if (!hasCompleteAssignments || !hasDifferentImages) {
+                std::size_t cursorIndex = 0;
+                const auto cursor = std::find(names.begin(), names.end(), savedCursor);
+                if (cursor != names.end()) {
+                    cursorIndex = static_cast<std::size_t>(cursor - names.begin());
+                }
+                for (std::size_t offset = displays.size(); offset > 0; --offset) {
+                    selectedImages[offset - 1] = cursorIndex;
+                    if (offset > 1) {
+                        const auto previous =
+                            swc::PreviousCandidateAttemptOrder(names, names[cursorIndex]);
+                        cursorIndex = previous.front();
+                    }
+                }
+            }
+
+            for (std::size_t displayIndex = 0;
+                 displayIndex < displays.size();
+                 ++displayIndex) {
+                const std::size_t desiredImage = selectedImages[displayIndex];
+                std::wstring lastFailure;
+                bool rendered = false;
+                for (const std::size_t candidate : swc::CandidateAttemptOrderFrom(
+                         names, names[desiredImage])) {
+                    try {
+                        CreateBackgroundPng(
+                            factory.Get(),
+                            images[candidate].path,
+                            displays[displayIndex].width,
+                            displays[displayIndex].height,
+                            temporaryPaths[displayIndex],
+                            settings);
+                        selectedImages[displayIndex] = candidate;
+                        rendered = true;
+                        break;
+                    } catch (const Failure& failure) {
+                        lastFailure = failure.message;
+                        DeleteFileW(temporaryPaths[displayIndex].c_str());
+                    }
+                }
+                if (!rendered) {
+                    Fail(lastFailure.empty()
+                        ? L"No usable image could be processed for display " +
+                            std::to_wstring(displayIndex + 1) + L"."
+                        : L"No usable image could be processed for display " +
+                            std::to_wstring(displayIndex + 1) + L".\r\n\r\n" +
+                            lastFailure);
+                }
+            }
+        }
+
+        for (std::size_t displayIndex = 0;
+             displayIndex < displays.size();
+             ++displayIndex) {
+            if (!MoveFileExW(
+                    temporaryPaths[displayIndex].c_str(),
+                    outputPaths[displayIndex].c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                FailWin32(L"Could not publish a generated wallpaper");
+            }
+            generated.push_back({
+                displays[displayIndex],
+                temporaryPaths[displayIndex],
+                outputPaths[displayIndex]});
+        }
+        for (const auto& item : generated) {
+            ApplyWallpaper(wallpaper.Get(), item.display, item.outputPath);
+        }
+        std::vector<swc::DisplayImage> displayImages;
+        displayImages.reserve(displays.size());
+        for (std::size_t displayIndex = 0;
+             displayIndex < displays.size();
+             ++displayIndex) {
+            displayImages.push_back({
+                displays[displayIndex].devicePath,
+                images[selectedImages[displayIndex]].path.wstring()});
+        }
+        UpdateWallpaperSettings(
+            settingsPath, settings.lastImage, displayImages, true);
+        RemoveUnusedGeneratedWallpapers(executableDirectory, wallpaper.Get(), displays);
+        return;
+    }
+
     std::wstring lastImage = savedCursor;
     const auto selectCandidate = [&](
         std::size_t displayIndex,
@@ -1827,7 +2552,8 @@ void Run(const WallpaperRequest& request) {
 
     const bool hasSavedCursor =
         std::find(names.begin(), names.end(), lastImage) != names.end();
-    if (request.displayDevicePath.empty() && request.previous && hasSavedCursor) {
+    if (request.displayDevicePath.empty() && request.previous && hasSavedCursor &&
+        settings.multiMonitorImageMode == swc::MultiMonitorImageMode::separateImages) {
         for (std::size_t skippedDisplay = 1; skippedDisplay < displays.size(); ++skippedDisplay) {
             const auto currentSequenceImage = selectCandidate(0, lastImage, false);
             lastImage = names[currentSequenceImage];
@@ -1884,25 +2610,56 @@ void Run(const WallpaperRequest& request) {
             Fail(L"The selected playlist image is no longer available.");
         }
 
-        for (std::size_t offset = 0; offset < displays.size(); ++offset) {
-            const std::size_t displayIndex = request.previous
-                ? displays.size() - 1 - offset
-                : offset;
-            const std::size_t selectedIndex = selectCandidate(
-                displayIndex,
-                startAtImage && offset == 0 ? request.firstImage : lastImage,
-                startAtImage && offset == 0);
-            lastImage = names[selectedIndex];
-            if (displayIndex == displays.size() - 1) {
+        if (settings.multiMonitorImageMode == swc::MultiMonitorImageMode::sameImage) {
+            if (!displays.empty()) {
+                const std::size_t selectedIndex = selectCandidate(
+                    0,
+                    startAtImage ? request.firstImage : lastImage,
+                    startAtImage);
+                lastImage = names[selectedIndex];
                 lastDisplayImage = lastImage;
+                for (std::size_t displayIndex = 0;
+                     displayIndex < displays.size();
+                     ++displayIndex) {
+                    if (displayIndex != 0) {
+                        CreateBackgroundPng(
+                            factory.Get(),
+                            images[selectedIndex].path,
+                            displays[displayIndex].width,
+                            displays[displayIndex].height,
+                            temporaryPaths[displayIndex],
+                            settings);
+                    }
+                    displayImages.push_back({
+                        displays[displayIndex].devicePath,
+                        images[selectedIndex].path.wstring()});
+                    generated.push_back({
+                        displays[displayIndex],
+                        temporaryPaths[displayIndex],
+                        outputPaths[displayIndex]});
+                }
             }
-            displayImages.push_back({
-                displays[displayIndex].devicePath,
-                images[selectedIndex].path.wstring()});
-            generated.push_back({
-                displays[displayIndex],
-                temporaryPaths[displayIndex],
-                outputPaths[displayIndex]});
+        } else {
+            for (std::size_t offset = 0; offset < displays.size(); ++offset) {
+                const std::size_t displayIndex = request.previous
+                    ? displays.size() - 1 - offset
+                    : offset;
+                const std::size_t selectedIndex = selectCandidate(
+                    displayIndex,
+                    startAtImage && offset == 0 ? request.firstImage : lastImage,
+                    startAtImage && offset == 0);
+                lastImage = names[selectedIndex];
+                if (displayIndex == displays.size() - 1) {
+                    lastDisplayImage = lastImage;
+                }
+                displayImages.push_back({
+                    displays[displayIndex].devicePath,
+                    images[selectedIndex].path.wstring()});
+                generated.push_back({
+                    displays[displayIndex],
+                    temporaryPaths[displayIndex],
+                    outputPaths[displayIndex]});
+            }
         }
     }
 
@@ -1964,19 +2721,43 @@ struct PlaylistRefreshPacket {
     std::wstring error;
 };
 
+struct PlaylistThumbnailSchedule {
+    std::mutex mutex;
+    std::deque<std::size_t> pendingRows;
+    std::vector<bool> pending;
+    bool rowsReady = false;
+};
+
 struct ResidentState {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
     HWND settingsWindow = nullptr;
     HWND settingsTabs = nullptr;
     HWND monitorPreviewPanel = nullptr;
+    HWND countdownDisplay = nullptr;
+    HWND countdownPreviousButton = nullptr;
+    HWND countdownStartStopButton = nullptr;
+    HWND countdownPauseResumeButton = nullptr;
+    HWND countdownRestartButton = nullptr;
+    HWND countdownNextButton = nullptr;
+    HWND countdownEnabledCheckbox = nullptr;
+    HWND countdownDurationGroup = nullptr;
+    HWND countdownHoursEdit = nullptr;
+    HWND countdownMinutesEdit = nullptr;
+    HWND countdownSecondsEdit = nullptr;
+    HWND countdownHoursLabel = nullptr;
+    HWND countdownMinutesLabel = nullptr;
+    HWND countdownSecondsLabel = nullptr;
     HWND changeOnStartCheckbox = nullptr;
     HWND openWindowOnStartCheckbox = nullptr;
+    HWND startWithWindowsCheckbox = nullptr;
     HWND backgroundFillModeLabel = nullptr;
     HWND backgroundFillColorModeRadio = nullptr;
     HWND backgroundAdaptiveModeRadio = nullptr;
     HWND backgroundFillColorLabel = nullptr;
     HWND backgroundFillColorButton = nullptr;
+    HWND multiMonitorSettingsGroup = nullptr;
+    HWND imagePlacementGroup = nullptr;
     HWND imageResizeToRadio = nullptr;
     HWND imageAutoFitRadio = nullptr;
     HWND imageResizeToPercentEdit = nullptr;
@@ -1993,16 +2774,32 @@ struct ResidentState {
     HWND imageLargeCenteredRadio = nullptr;
     HWND imageLargeFillRadio = nullptr;
     HWND imageLargeFitRadio = nullptr;
+    HWND sameImageOnDisplaysRadio = nullptr;
+    HWND separateImagesOnDisplaysRadio = nullptr;
     RECT settingsWindowNormalRect{};
     bool hasSettingsWindowNormalRect = false;
     HWND sourceDirectoryList = nullptr;
     HWND sourceDirectoryHint = nullptr;
+    HWND sourceListGroup = nullptr;
+    HWND sourceFoldersModeRadio = nullptr;
+    HWND playlistFileModeRadio = nullptr;
+    HWND newPlaylistFileButton = nullptr;
+    HWND openPlaylistFileButton = nullptr;
+    HWND saveAsPlaylistFileButton = nullptr;
     HWND playlistList = nullptr;
     HWND playlistHint = nullptr;
+    HWND playlistAddFilesButton = nullptr;
+    HWND playlistAddFolderButton = nullptr;
+    HWND playlistRemoveButton = nullptr;
+    HWND playlistDeleteButton = nullptr;
+    HWND playlistRemoveDuplicatesButton = nullptr;
     HFONT settingsFont = nullptr;
+    HFONT countdownFont = nullptr;
     HIMAGELIST playlistImageList = nullptr;
     std::filesystem::path settingsPath;
     swc::Settings settings;
+    std::vector<std::wstring> playlistFileEntries;
+    bool playlistFileDirty = false;
     std::vector<SourceImage> playlistSources;
     std::vector<std::wstring> playlistDisplayNames;
     std::vector<Display> playlistDisplays;
@@ -2013,9 +2810,16 @@ struct ResidentState {
     std::mutex playlistPacketMutex;
     std::vector<PlaylistRefreshPacket> playlistPackets;
     std::shared_ptr<std::atomic_bool> playlistCancel;
+    std::shared_ptr<PlaylistThumbnailSchedule> playlistThumbnailSchedule;
     std::thread playlistThread;
     std::uint64_t playlistGeneration = 0;
     std::size_t playlistInvalidCount = 0;
+    int playlistPriorityFirstVisibleRow = -1;
+    int playlistPriorityVisibleRowCount = -1;
+    bool playlistRowsApplied = false;
+    std::wstring playlistOperationStatus;
+    std::vector<std::size_t> playlistPendingSelectionRows;
+    std::uint64_t playlistPendingSelectionGeneration = 0;
     bool playlistRunning = false;
     bool playlistRefreshPending = false;
     std::wstring settingsWindowError;
@@ -2027,9 +2831,19 @@ struct ResidentState {
     HWND playlistDragGhost = nullptr;
     int monitorDropTarget = -1;
     NOTIFYICONDATAW icon{};
+    HICON defaultTrayIcon = nullptr;
+    HICON countdownTrayIcon = nullptr;
+    std::wstring lastTrayIconKey;
     bool iconAdded = false;
+    bool trayIconUpdateFailed = false;
     bool changeRunning = false;
     bool backgroundReapplyPending = false;
+    bool multiMonitorModeReapplyPending = false;
+    bool countdownPaused = false;
+    bool timerNextPending = false;
+    std::uint32_t countdownRemainingSeconds = 600;
+    std::uint32_t lastDisplayedCountdown = std::numeric_limits<std::uint32_t>::max();
+    std::chrono::steady_clock::time_point countdownDeadline{};
     bool shuttingDown = false;
     std::atomic_bool changeFinished = false;
     std::thread changeThread;
@@ -2037,6 +2851,560 @@ struct ResidentState {
     std::wstring changeError;
     std::wstring startupError;
 };
+
+std::wstring FormatCountdown(std::uint32_t seconds) {
+    const std::uint32_t hours = seconds / 3600;
+    const std::uint32_t minutes = (seconds / 60) % 60;
+    const std::uint32_t remainder = seconds % 60;
+    std::wostringstream formatted;
+    formatted << std::setfill(L'0') << std::setw(2) << hours << L":"
+        << std::setw(2) << minutes << L":" << std::setw(2) << remainder;
+    return formatted.str();
+}
+
+std::wstring FormatTrayCountdown(std::uint32_t seconds) {
+    return swc::FormatCountdownTrayValue(seconds);
+}
+
+HICON CreateCountdownTrayIcon(const std::wstring& text) {
+    constexpr int iconSize = 64;
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+    bitmapInfo.bmiHeader.biWidth = iconSize;
+    bitmapInfo.bmiHeader.biHeight = -iconSize;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+    void* pixels = nullptr;
+    HBITMAP colorBitmap = CreateDIBSection(
+        nullptr, &bitmapInfo, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    if (!colorBitmap || !pixels) {
+        if (colorBitmap) {
+            DeleteObject(colorBitmap);
+        }
+        return nullptr;
+    }
+    auto* bgraPixels = static_cast<std::uint32_t*>(pixels);
+    std::fill_n(
+        bgraPixels,
+        iconSize * iconSize,
+        static_cast<std::uint32_t>(RGB(20, 42, 68)) | 0xFF000000);
+
+    HDC drawContext = CreateCompatibleDC(nullptr);
+    if (!drawContext) {
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    HGDIOBJ oldBitmap = SelectObject(drawContext, colorBitmap);
+    RECT background{2, 2, iconSize - 2, iconSize - 2};
+    HBRUSH backgroundBrush = CreateSolidBrush(RGB(20, 42, 68));
+    HPEN borderPen = CreatePen(PS_SOLID, 4, RGB(64, 190, 220));
+    HFONT textFont = CreateFontW(
+        -35, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    if (!backgroundBrush || !borderPen || !textFont) {
+        if (textFont) {
+            DeleteObject(textFont);
+        }
+        if (borderPen) {
+            DeleteObject(borderPen);
+        }
+        if (backgroundBrush) {
+            DeleteObject(backgroundBrush);
+        }
+        SelectObject(drawContext, oldBitmap);
+        DeleteDC(drawContext);
+        DeleteObject(colorBitmap);
+        return nullptr;
+    }
+
+    HGDIOBJ oldBrush = SelectObject(drawContext, backgroundBrush);
+    HGDIOBJ oldPen = SelectObject(drawContext, borderPen);
+    RoundRect(drawContext, 2, 2, iconSize - 2, iconSize - 2, 14, 14);
+    SetBkMode(drawContext, TRANSPARENT);
+    SetTextColor(drawContext, RGB(255, 255, 255));
+    HGDIOBJ oldFont = SelectObject(drawContext, textFont);
+    DrawTextW(
+        drawContext,
+        text.c_str(),
+        static_cast<int>(text.size()),
+        &background,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+    for (int y = 0; y < iconSize; ++y) {
+        for (int x = 0; x < iconSize; ++x) {
+            const bool insideHorizontal = x >= 9 && x <= 54;
+            const bool insideVertical = y >= 9 && y <= 54;
+            bool insideRoundedCorners = insideHorizontal || insideVertical;
+            if (!insideRoundedCorners && x >= 2 && x <= 61 && y >= 2 && y <= 61) {
+                const int cornerCenterX = x < 9 ? 9 : 54;
+                const int cornerCenterY = y < 9 ? 9 : 54;
+                const int dx = x - cornerCenterX;
+                const int dy = y - cornerCenterY;
+                insideRoundedCorners = dx * dx + dy * dy <= 49;
+            }
+            const int index = y * iconSize + x;
+            bgraPixels[index] =
+                (bgraPixels[index] & 0x00FFFFFF) |
+                (insideRoundedCorners ? 0xFF000000 : 0);
+        }
+    }
+
+    HBITMAP maskBitmap = CreateBitmap(iconSize, iconSize, 1, 1, nullptr);
+    HDC maskContext = maskBitmap ? CreateCompatibleDC(nullptr) : nullptr;
+    bool maskReady = maskContext != nullptr;
+    if (maskReady) {
+        HGDIOBJ oldMaskBitmap = SelectObject(maskContext, maskBitmap);
+        HBRUSH transparentBrush = CreateSolidBrush(RGB(255, 255, 255));
+        HBRUSH opaqueBrush = CreateSolidBrush(RGB(0, 0, 0));
+        HPEN maskPen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+        if (transparentBrush && opaqueBrush && maskPen) {
+            PatBlt(maskContext, 0, 0, iconSize, iconSize, WHITENESS);
+            SelectObject(maskContext, opaqueBrush);
+            SelectObject(maskContext, maskPen);
+            RoundRect(maskContext, 2, 2, iconSize - 2, iconSize - 2, 14, 14);
+        } else {
+            maskReady = false;
+        }
+        if (maskPen) {
+            DeleteObject(maskPen);
+        }
+        if (opaqueBrush) {
+            DeleteObject(opaqueBrush);
+        }
+        if (transparentBrush) {
+            DeleteObject(transparentBrush);
+        }
+        SelectObject(maskContext, oldMaskBitmap);
+        DeleteDC(maskContext);
+    }
+
+    HICON icon = nullptr;
+    if (maskReady) {
+        ICONINFO iconInfo{};
+        iconInfo.fIcon = TRUE;
+        iconInfo.hbmColor = colorBitmap;
+        iconInfo.hbmMask = maskBitmap;
+        icon = CreateIconIndirect(&iconInfo);
+    }
+
+    DeleteObject(maskBitmap);
+    SelectObject(drawContext, oldFont);
+    SelectObject(drawContext, oldPen);
+    SelectObject(drawContext, oldBrush);
+    DeleteObject(textFont);
+    DeleteObject(borderPen);
+    DeleteObject(backgroundBrush);
+    SelectObject(drawContext, oldBitmap);
+    DeleteDC(drawContext);
+    DeleteObject(colorBitmap);
+    return icon;
+}
+
+void UpdateTrayIcon(ResidentState& state, std::uint32_t remainingSeconds) {
+    if (!state.iconAdded) {
+        return;
+    }
+
+    const std::wstring key = state.settings.countdownEnabled
+        ? L"timer:" + FormatTrayCountdown(remainingSeconds)
+        : L"stopped";
+    if (key == state.lastTrayIconKey) {
+        return;
+    }
+
+    HICON nextIcon = state.defaultTrayIcon;
+    HICON newlyCreatedIcon = nullptr;
+    if (state.settings.countdownEnabled) {
+        newlyCreatedIcon = CreateCountdownTrayIcon(
+            FormatTrayCountdown(remainingSeconds));
+        if (!newlyCreatedIcon) {
+            if (!state.trayIconUpdateFailed) {
+                ShowError(
+                    L"Could not create the countdown tray icon: " +
+                        Win32Message(GetLastError()),
+                    state.window);
+                state.trayIconUpdateFailed = true;
+            }
+            return;
+        }
+        nextIcon = newlyCreatedIcon;
+    }
+
+    const HICON previousCountdownIcon = state.countdownTrayIcon;
+    state.icon.hIcon = nextIcon;
+    state.icon.uFlags = NIF_ICON;
+    if (!Shell_NotifyIconW(NIM_MODIFY, &state.icon)) {
+        const DWORD error = GetLastError();
+        state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        state.icon.hIcon = previousCountdownIcon
+            ? previousCountdownIcon
+            : state.defaultTrayIcon;
+        if (newlyCreatedIcon) {
+            DestroyIcon(newlyCreatedIcon);
+        }
+        if (!state.trayIconUpdateFailed) {
+            ShowError(
+                L"Could not update the countdown tray icon: " +
+                    Win32Message(error),
+                state.window);
+            state.trayIconUpdateFailed = true;
+        }
+        return;
+    }
+
+    state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    state.countdownTrayIcon = newlyCreatedIcon;
+    if (previousCountdownIcon) {
+        DestroyIcon(previousCountdownIcon);
+    }
+    state.lastTrayIconKey = key;
+    state.trayIconUpdateFailed = false;
+}
+
+std::uint32_t CurrentCountdownSeconds(const ResidentState& state) {
+    if (!state.settings.countdownEnabled || state.countdownPaused) {
+        return state.countdownRemainingSeconds;
+    }
+
+    const auto remaining = state.countdownDeadline - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+        return 0;
+    }
+    const auto milliseconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+    return static_cast<std::uint32_t>((milliseconds + 999) / 1000);
+}
+
+void SyncCountdownControls(ResidentState& state) {
+    if (state.countdownEnabledCheckbox) {
+        SendMessageW(
+            state.countdownEnabledCheckbox,
+            BM_SETCHECK,
+            state.settings.countdownEnabled ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+    if (state.countdownHoursEdit) {
+        SetWindowTextW(
+            state.countdownHoursEdit,
+            std::to_wstring(state.settings.countdownHours).c_str());
+    }
+    if (state.countdownMinutesEdit) {
+        SetWindowTextW(
+            state.countdownMinutesEdit,
+            std::to_wstring(state.settings.countdownMinutes).c_str());
+    }
+    if (state.countdownSecondsEdit) {
+        SetWindowTextW(
+            state.countdownSecondsEdit,
+            std::to_wstring(state.settings.countdownSeconds).c_str());
+    }
+    if (state.countdownStartStopButton) {
+        SetWindowTextW(
+            state.countdownStartStopButton,
+            state.settings.countdownEnabled
+                ? L"Stop countdown"
+                : L"Start countdown");
+        InvalidateRect(state.countdownStartStopButton, nullptr, TRUE);
+    }
+    if (state.countdownPauseResumeButton) {
+        SetWindowTextW(
+            state.countdownPauseResumeButton,
+            state.countdownPaused
+                ? L"Resume countdown"
+                : L"Pause countdown");
+        EnableWindow(
+            state.countdownPauseResumeButton,
+            state.settings.countdownEnabled);
+        InvalidateRect(state.countdownPauseResumeButton, nullptr, TRUE);
+    }
+    if (state.countdownRestartButton) {
+        EnableWindow(state.countdownRestartButton, state.settings.countdownEnabled);
+        InvalidateRect(state.countdownRestartButton, nullptr, TRUE);
+    }
+    state.lastDisplayedCountdown = std::numeric_limits<std::uint32_t>::max();
+}
+
+void RefreshCountdownDisplay(ResidentState& state) {
+    const std::uint32_t remaining = CurrentCountdownSeconds(state);
+    UpdateTrayIcon(state, remaining);
+    if (remaining != state.lastDisplayedCountdown) {
+        if (state.countdownDisplay) {
+            SetWindowTextW(
+                state.countdownDisplay,
+                FormatCountdown(remaining).c_str());
+        }
+        state.lastDisplayedCountdown = remaining;
+    }
+}
+
+void DrawCountdownButton(const DRAWITEMSTRUCT& draw, const ResidentState& state) {
+    UINT frameState = DFCS_BUTTONPUSH;
+    if ((draw.itemState & ODS_SELECTED) != 0) {
+        frameState |= DFCS_PUSHED;
+    }
+    if ((draw.itemState & ODS_DISABLED) != 0) {
+        frameState |= DFCS_INACTIVE;
+    }
+    DrawFrameControl(draw.hDC, const_cast<RECT*>(&draw.rcItem), DFC_BUTTON, frameState);
+
+    const int centerX = (draw.rcItem.left + draw.rcItem.right) / 2;
+    const int centerY = (draw.rcItem.top + draw.rcItem.bottom) / 2;
+    const int offset = (draw.itemState & ODS_SELECTED) != 0 ? 1 : 0;
+    const int colorIndex = (draw.itemState & ODS_DISABLED) != 0
+        ? COLOR_GRAYTEXT
+        : COLOR_BTNTEXT;
+    HPEN pen = CreatePen(PS_SOLID, 2, GetSysColor(colorIndex));
+    HGDIOBJ previousPen = SelectObject(draw.hDC, pen);
+    HGDIOBJ previousBrush = SelectObject(
+        draw.hDC,
+        GetSysColorBrush(colorIndex == COLOR_GRAYTEXT ? COLOR_GRAYTEXT : COLOR_BTNTEXT));
+    const auto triangle = [&](POINT first, POINT second, POINT third) {
+        POINT points[] = {first, second, third};
+        Polygon(draw.hDC, points, static_cast<int>(std::size(points)));
+    };
+
+    switch (GetDlgCtrlID(draw.hwndItem)) {
+    case kCountdownPreviousButtonId:
+        MoveToEx(draw.hDC, centerX - 7 + offset, centerY - 8 + offset, nullptr);
+        LineTo(draw.hDC, centerX - 7 + offset, centerY + 8 + offset);
+        triangle(
+            {centerX - 5 + offset, centerY + offset},
+            {centerX + 6 + offset, centerY - 8 + offset},
+            {centerX + 6 + offset, centerY + 8 + offset});
+        break;
+    case kCountdownNextButtonId:
+        triangle(
+            {centerX + 5 + offset, centerY + offset},
+            {centerX - 6 + offset, centerY - 8 + offset},
+            {centerX - 6 + offset, centerY + 8 + offset});
+        MoveToEx(draw.hDC, centerX + 7 + offset, centerY - 8 + offset, nullptr);
+        LineTo(draw.hDC, centerX + 7 + offset, centerY + 8 + offset);
+        break;
+    case kCountdownStartStopButtonId:
+        if (state.settings.countdownEnabled) {
+            Rectangle(
+                draw.hDC,
+                centerX - 6 + offset,
+                centerY - 6 + offset,
+                centerX + 7 + offset,
+                centerY + 7 + offset);
+        } else {
+            triangle(
+                {centerX + 7 + offset, centerY + offset},
+                {centerX - 6 + offset, centerY - 8 + offset},
+                {centerX - 6 + offset, centerY + 8 + offset});
+        }
+        break;
+    case kCountdownPauseResumeButtonId:
+        if (state.countdownPaused) {
+            triangle(
+                {centerX + 7 + offset, centerY + offset},
+                {centerX - 6 + offset, centerY - 8 + offset},
+                {centerX - 6 + offset, centerY + 8 + offset});
+        } else {
+            Rectangle(
+                draw.hDC,
+                centerX - 7 + offset,
+                centerY - 7 + offset,
+                centerX - 2 + offset,
+                centerY + 8 + offset);
+            Rectangle(
+                draw.hDC,
+                centerX + 2 + offset,
+                centerY - 7 + offset,
+                centerX + 7 + offset,
+                centerY + 8 + offset);
+        }
+        break;
+    case kCountdownRestartButtonId:
+    {
+        POINT rewindArc[] = {
+            {centerX - 4 + offset, centerY - 6 + offset},
+            {centerX - 1 + offset, centerY - 8 + offset},
+            {centerX + 3 + offset, centerY - 7 + offset},
+            {centerX + 6 + offset, centerY - 4 + offset},
+            {centerX + 8 + offset, centerY + offset},
+            {centerX + 6 + offset, centerY + 4 + offset},
+            {centerX + 3 + offset, centerY + 6 + offset},
+            {centerX + offset, centerY + 7 + offset},
+            {centerX - 3 + offset, centerY + 6 + offset},
+            {centerX - 6 + offset, centerY + 4 + offset}};
+        HPEN rewindPen = CreatePen(PS_SOLID, 3, GetSysColor(colorIndex));
+        HGDIOBJ previousRewindPen = SelectObject(draw.hDC, rewindPen);
+        Polyline(draw.hDC, rewindArc, static_cast<int>(std::size(rewindArc)));
+        triangle(
+            {centerX - 9 + offset, centerY - 6 + offset},
+            {centerX - 3 + offset, centerY - 9 + offset},
+            {centerX - 3 + offset, centerY - 3 + offset});
+        SelectObject(draw.hDC, previousRewindPen);
+        DeleteObject(rewindPen);
+        break;
+    }
+    default:
+        break;
+    }
+
+    SelectObject(draw.hDC, previousBrush);
+    SelectObject(draw.hDC, previousPen);
+    DeleteObject(pen);
+    if ((draw.itemState & ODS_FOCUS) != 0) {
+        RECT focusRect = draw.rcItem;
+        InflateRect(&focusRect, -3, -3);
+        DrawFocusRect(draw.hDC, &focusRect);
+    }
+}
+
+void DrawPlaylistFileButton(const DRAWITEMSTRUCT& draw) {
+    UINT frameState = DFCS_BUTTONPUSH;
+    if ((draw.itemState & ODS_SELECTED) != 0) {
+        frameState |= DFCS_PUSHED;
+    }
+    if ((draw.itemState & ODS_DISABLED) != 0) {
+        frameState |= DFCS_INACTIVE;
+    }
+    DrawFrameControl(draw.hDC, const_cast<RECT*>(&draw.rcItem), DFC_BUTTON, frameState);
+
+    const int offset = (draw.itemState & ODS_SELECTED) != 0 ? 1 : 0;
+    const int centerY = (draw.rcItem.top + draw.rcItem.bottom) / 2 + offset;
+    const COLORREF color = GetSysColor(
+        (draw.itemState & ODS_DISABLED) != 0 ? COLOR_GRAYTEXT : COLOR_BTNTEXT);
+    wchar_t text[64]{};
+    GetWindowTextW(draw.hwndItem, text, static_cast<int>(std::size(text)));
+    HFONT font = reinterpret_cast<HFONT>(
+        SendMessageW(draw.hwndItem, WM_GETFONT, 0, 0));
+    HGDIOBJ previousFont = font ? SelectObject(draw.hDC, font) : nullptr;
+    SIZE textSize{};
+    GetTextExtentPoint32W(
+        draw.hDC,
+        text,
+        static_cast<int>(std::wcslen(text)),
+        &textSize);
+    constexpr int horizontalPadding = 8;
+    constexpr int iconSlotWidth = 30;
+    constexpr int iconTextGap = 4;
+    const int buttonWidth = static_cast<int>(
+        draw.rcItem.right - draw.rcItem.left);
+    const int availableTextWidth = std::max(
+        1,
+        buttonWidth -
+            2 * horizontalPadding - iconSlotWidth - iconTextGap);
+    const int textWidth = std::min(
+        static_cast<int>(textSize.cx), availableTextWidth);
+    const int contentWidth = iconSlotWidth + iconTextGap + textWidth;
+    const int contentLeft = static_cast<int>(draw.rcItem.left) +
+        std::max(0, (buttonWidth - contentWidth) / 2) +
+        offset;
+    const int centerX = contentLeft + iconSlotWidth / 2;
+    HPEN pen = CreatePen(PS_SOLID, 2, color);
+    HGDIOBJ previousPen = SelectObject(draw.hDC, pen);
+    HGDIOBJ previousBrush = SelectObject(draw.hDC, GetStockObject(HOLLOW_BRUSH));
+
+    switch (GetDlgCtrlID(draw.hwndItem)) {
+    case kAddSourceDirectoryButtonId:
+    case kPlaylistAddFolderButtonId:
+    {
+        POINT folder[] = {
+            {centerX - 11, centerY - 5},
+            {centerX - 4, centerY - 5},
+            {centerX - 1, centerY - 2},
+            {centerX + 8, centerY - 2},
+            {centerX + 6, centerY + 6},
+            {centerX - 10, centerY + 6},
+            {centerX - 11, centerY - 5}};
+        Polyline(draw.hDC, folder, static_cast<int>(std::size(folder)));
+        MoveToEx(draw.hDC, centerX + 8, centerY + 4, nullptr);
+        LineTo(draw.hDC, centerX + 14, centerY + 4);
+        MoveToEx(draw.hDC, centerX + 11, centerY + 1, nullptr);
+        LineTo(draw.hDC, centerX + 11, centerY + 7);
+        break;
+    }
+    case kPlaylistAddFilesButtonId:
+        Rectangle(draw.hDC, centerX - 7, centerY - 10, centerX + 6, centerY + 10);
+        MoveToEx(draw.hDC, centerX - 3, centerY, nullptr);
+        LineTo(draw.hDC, centerX + 3, centerY);
+        MoveToEx(draw.hDC, centerX, centerY - 3, nullptr);
+        LineTo(draw.hDC, centerX, centerY + 3);
+        break;
+    case kNewPlaylistFileButtonId:
+        Rectangle(draw.hDC, centerX - 7, centerY - 10, centerX + 6, centerY + 10);
+        MoveToEx(draw.hDC, centerX - 3, centerY, nullptr);
+        LineTo(draw.hDC, centerX + 3, centerY);
+        MoveToEx(draw.hDC, centerX, centerY - 3, nullptr);
+        LineTo(draw.hDC, centerX, centerY + 3);
+        break;
+    case kOpenPlaylistFileButtonId:
+    {
+        POINT folder[] = {
+            {centerX - 10, centerY - 5},
+            {centerX - 3, centerY - 5},
+            {centerX, centerY - 2},
+            {centerX + 10, centerY - 2},
+            {centerX + 8, centerY + 7},
+            {centerX - 9, centerY + 7},
+            {centerX - 10, centerY - 5}};
+        Polyline(draw.hDC, folder, static_cast<int>(std::size(folder)));
+        break;
+    }
+    case kSaveAsPlaylistFileButtonId:
+        Rectangle(draw.hDC, centerX - 9, centerY - 9, centerX + 9, centerY + 9);
+        Rectangle(draw.hDC, centerX - 5, centerY - 8, centerX + 5, centerY - 3);
+        Rectangle(draw.hDC, centerX - 5, centerY + 1, centerX + 5, centerY + 7);
+        break;
+    case kRemoveSourceDirectoryButtonId:
+    case kPlaylistRemoveButtonId:
+    case kPlaylistDeleteButtonId:
+        MoveToEx(draw.hDC, centerX - 9, centerY - 7, nullptr);
+        LineTo(draw.hDC, centerX + 9, centerY - 7);
+        MoveToEx(draw.hDC, centerX - 5, centerY - 10, nullptr);
+        LineTo(draw.hDC, centerX + 5, centerY - 10);
+        MoveToEx(draw.hDC, centerX - 8, centerY - 5, nullptr);
+        LineTo(draw.hDC, centerX - 6, centerY + 9);
+        LineTo(draw.hDC, centerX + 6, centerY + 9);
+        LineTo(draw.hDC, centerX + 8, centerY - 5);
+        MoveToEx(draw.hDC, centerX - 2, centerY - 3, nullptr);
+        LineTo(draw.hDC, centerX - 2, centerY + 6);
+        MoveToEx(draw.hDC, centerX + 2, centerY - 3, nullptr);
+        LineTo(draw.hDC, centerX + 2, centerY + 6);
+        break;
+    case kPlaylistRemoveDuplicatesButtonId:
+        Rectangle(draw.hDC, centerX - 9, centerY - 8, centerX + 4, centerY + 8);
+        Rectangle(draw.hDC, centerX - 4, centerY - 5, centerX + 9, centerY + 11);
+        MoveToEx(draw.hDC, centerX - 1, centerY + 3, nullptr);
+        LineTo(draw.hDC, centerX + 2, centerY + 6);
+        LineTo(draw.hDC, centerX + 7, centerY);
+        break;
+    default:
+        break;
+    }
+
+    SelectObject(draw.hDC, previousBrush);
+    SelectObject(draw.hDC, previousPen);
+    DeleteObject(pen);
+
+    RECT textRect = draw.rcItem;
+    textRect.left = contentLeft + iconSlotWidth + iconTextGap;
+    textRect.right = textRect.left + textWidth;
+    SetBkMode(draw.hDC, TRANSPARENT);
+    SetTextColor(draw.hDC, color);
+    DrawTextW(
+        draw.hDC,
+        text,
+        -1,
+        &textRect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (previousFont) {
+        SelectObject(draw.hDC, previousFont);
+    }
+    if ((draw.itemState & ODS_FOCUS) != 0) {
+        RECT focusRect = draw.rcItem;
+        InflateRect(&focusRect, -3, -3);
+        DrawFocusRect(draw.hDC, &focusRect);
+    }
+}
 
 void LayoutMonitorPreviews(ResidentState& state) {
     if (!state.monitorPreviewPanel) {
@@ -2350,30 +3718,49 @@ LRESULT CALLBACK PlaylistDragGhostProc(
             SelectObject(dc, previousPen);
             DeleteObject(border);
 
+            const bool folderSourceMode = state->settings.imageSourceMode ==
+                swc::ImageSourceMode::sourceFolders;
+            const std::size_t sourceCount = folderSourceMode
+                ? state->settings.sourceDirectories.size()
+                : state->settings.recentPlaylistFiles.size();
             if (state->draggingSourceIndex >= 0 &&
-                static_cast<std::size_t>(state->draggingSourceIndex) <
-                    state->settings.sourceDirectories.size()) {
-                RECT folder{12, 19, 34, 39};
-                HBRUSH folderBrush = CreateSolidBrush(RGB(245, 196, 66));
-                HPEN folderPen = CreatePen(PS_SOLID, 1, RGB(149, 104, 20));
-                HGDIOBJ previousBrush = SelectObject(dc, folderBrush);
-                HGDIOBJ previousPen = SelectObject(dc, folderPen);
-                POINT folderShape[] = {
-                    {folder.left, folder.top + 4},
-                    {folder.left + 7, folder.top + 4},
-                    {folder.left + 9, folder.top},
-                    {folder.right, folder.top},
-                    {folder.right, folder.bottom},
-                    {folder.left, folder.bottom}};
-                Polygon(dc, folderShape, static_cast<int>(std::size(folderShape)));
+                static_cast<std::size_t>(state->draggingSourceIndex) < sourceCount) {
+                RECT icon{12, 19, 34, 39};
+                HBRUSH iconBrush = CreateSolidBrush(
+                    folderSourceMode ? RGB(245, 196, 66) : RGB(235, 239, 244));
+                HPEN iconPen = CreatePen(
+                    PS_SOLID,
+                    1,
+                    folderSourceMode ? RGB(149, 104, 20) : RGB(99, 111, 124));
+                HGDIOBJ previousBrush = SelectObject(dc, iconBrush);
+                HGDIOBJ previousPen = SelectObject(dc, iconPen);
+                if (folderSourceMode) {
+                    POINT folderShape[] = {
+                        {icon.left, icon.top + 4},
+                        {icon.left + 7, icon.top + 4},
+                        {icon.left + 9, icon.top},
+                        {icon.right, icon.top},
+                        {icon.right, icon.bottom},
+                        {icon.left, icon.bottom}};
+                    Polygon(dc, folderShape, static_cast<int>(std::size(folderShape)));
+                } else {
+                    Rectangle(dc, icon.left + 3, icon.top, icon.right - 3, icon.bottom);
+                    MoveToEx(dc, icon.left + 7, icon.top + 7, nullptr);
+                    LineTo(dc, icon.right - 7, icon.top + 7);
+                    MoveToEx(dc, icon.left + 7, icon.top + 12, nullptr);
+                    LineTo(dc, icon.right - 7, icon.top + 12);
+                }
                 SelectObject(dc, previousPen);
                 SelectObject(dc, previousBrush);
-                DeleteObject(folderPen);
-                DeleteObject(folderBrush);
+                DeleteObject(iconPen);
+                DeleteObject(iconBrush);
 
                 const std::filesystem::path sourcePath(
-                    state->settings.sourceDirectories[
-                        static_cast<std::size_t>(state->draggingSourceIndex)].path);
+                    folderSourceMode
+                        ? state->settings.sourceDirectories[
+                            static_cast<std::size_t>(state->draggingSourceIndex)].path
+                        : state->settings.recentPlaylistFiles[
+                            static_cast<std::size_t>(state->draggingSourceIndex)]);
                 const std::wstring name = sourcePath.filename().empty()
                     ? sourcePath.wstring()
                     : sourcePath.filename().wstring();
@@ -2572,18 +3959,42 @@ LRESULT CALLBACK MonitorPreviewPanelProc(
 void RefreshSourceDirectoryList(ResidentState& state) {
     state.refreshingSourceList = true;
     ListView_DeleteAllItems(state.sourceDirectoryList);
-    for (std::size_t index = 0; index < state.settings.sourceDirectories.size(); ++index) {
-        const auto& directory = state.settings.sourceDirectories[index];
+    const bool folderMode =
+        state.settings.imageSourceMode == swc::ImageSourceMode::sourceFolders;
+    const std::size_t itemCount = folderMode
+        ? state.settings.sourceDirectories.size()
+        : state.settings.recentPlaylistFiles.size();
+    int selectedRow = -1;
+    for (std::size_t index = 0; index < itemCount; ++index) {
+        const std::wstring& path = folderMode
+            ? state.settings.sourceDirectories[index].path
+            : state.settings.recentPlaylistFiles[index];
         LVITEMW item{};
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(index);
-        item.pszText = const_cast<wchar_t*>(directory.path.c_str());
+        item.pszText = const_cast<wchar_t*>(path.c_str());
         const int row = ListView_InsertItem(state.sourceDirectoryList, &item);
         if (row < 0) {
             state.refreshingSourceList = false;
-            Fail(L"Could not display the source folder list.");
+            Fail(L"Could not display the source list.");
         }
-        ListView_SetCheckState(state.sourceDirectoryList, row, directory.enabled);
+        if (folderMode) {
+            ListView_SetCheckState(
+                state.sourceDirectoryList,
+                row,
+                state.settings.sourceDirectories[index].enabled);
+        } else if (swc::PlaylistPathsEqual(
+                       path, state.settings.playlistFilePath)) {
+            ListView_SetCheckState(state.sourceDirectoryList, row, TRUE);
+            selectedRow = row;
+        }
+    }
+    if (selectedRow >= 0) {
+        ListView_SetItemState(
+            state.sourceDirectoryList,
+            selectedRow,
+            LVIS_SELECTED | LVIS_FOCUSED,
+            LVIS_SELECTED | LVIS_FOCUSED);
     }
     state.refreshingSourceList = false;
 }
@@ -2619,7 +4030,8 @@ void ScrollPlaylistToCurrentImage(const ResidentState& state) {
 
 void RefreshPlaylistDisplayAssignments(
     ResidentState& state,
-    const swc::Settings& settings) {
+    const swc::Settings& settings,
+    bool scrollToCurrentImage = false) {
     auto wallpaper = CreateDesktopWallpaper();
     state.playlistDisplays = ConnectedDisplays(wallpaper.Get());
     state.playlistDisplayNames.assign(state.playlistSources.size(), L"");
@@ -2680,7 +4092,9 @@ void RefreshPlaylistDisplayAssignments(
             3,
             const_cast<wchar_t*>(state.playlistDisplayNames[row].c_str()));
     }
-    ScrollPlaylistToCurrentImage(state);
+    if (scrollToCurrentImage) {
+        ScrollPlaylistToCurrentImage(state);
+    }
     InvalidateRect(state.playlistList, nullptr, TRUE);
 }
 
@@ -2716,6 +4130,7 @@ void FinishPlaylistRefresh(ResidentState& state) {
     }
     state.playlistRunning = false;
     state.playlistCancel.reset();
+    state.playlistThumbnailSchedule.reset();
     if (state.playlistRefreshPending && state.settingsWindow &&
         TabCtrl_GetCurSel(state.settingsTabs) == 2) {
         state.playlistRefreshPending = false;
@@ -2724,10 +4139,14 @@ void FinishPlaylistRefresh(ResidentState& state) {
 }
 
 void SetPlaylistHint(ResidentState& state, bool loading) {
-    const std::wstring hintText = loading
+    const std::wstring hintText = !state.playlistOperationStatus.empty()
+        ? state.playlistOperationStatus
+        : loading
         ? L"Loading playlist; thumbnails will appear as they are ready..."
         : state.playlistSources.empty()
-        ? L"No supported images were found in the enabled source folders."
+        ? state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile
+            ? L"The active playlist contains no supported images."
+            : L"No supported images were found in the enabled source folders."
         : state.playlistInvalidCount == 0
         ? L"Double-click to start with an image, or right-click to set it on one display."
         : std::to_wstring(state.playlistInvalidCount) +
@@ -2752,10 +4171,25 @@ void StartPlaylistRefresh(ResidentState& state) {
         state.playlistThread.join();
     }
 
+    const bool preservePendingSelection = state.playlistRefreshPending;
+    const int initialFirstVisibleRow =
+        std::max(0, ListView_GetTopIndex(state.playlistList));
+    const int initialVisibleRowCount =
+        std::max(1, ListView_GetCountPerPage(state.playlistList));
     ++state.playlistGeneration;
     const std::uint64_t generation = state.playlistGeneration;
     const auto cancellation = std::make_shared<std::atomic_bool>(false);
+    const auto schedule = std::make_shared<PlaylistThumbnailSchedule>();
     state.playlistCancel = cancellation;
+    state.playlistThumbnailSchedule = schedule;
+    state.playlistPriorityFirstVisibleRow = -1;
+    state.playlistPriorityVisibleRowCount = -1;
+    state.playlistRowsApplied = false;
+    if (!preservePendingSelection) {
+        state.playlistOperationStatus.clear();
+        state.playlistPendingSelectionRows.clear();
+        state.playlistPendingSelectionGeneration = 0;
+    }
     state.playlistRunning = true;
     state.playlistRefreshPending = false;
     state.playlistSources.clear();
@@ -2775,14 +4209,46 @@ void StartPlaylistRefresh(ResidentState& state) {
     const auto cache = state.playlistThumbnailCache;
     const auto settingsPath = state.settingsPath;
     const auto executableDirectory = ExecutableDirectory();
+    const auto playlistFileEntries = state.playlistFileEntries;
     try {
         state.playlistThread = std::thread(
-            [&state, cancellation, generation, cache, settingsPath, executableDirectory]() {
+            [&state,
+                cancellation,
+                schedule,
+                generation,
+                initialFirstVisibleRow,
+                initialVisibleRowCount,
+                cache,
+                settingsPath,
+                executableDirectory,
+                playlistFileEntries]() {
                 std::wstring failureMessage;
                 try {
                     const auto settings = ReadSettings(settingsPath);
-                    const auto sources =
-                        FindSourceImages(settings.sourceDirectories, executableDirectory);
+                    std::vector<SourceImage> sources;
+                    if (settings.imageSourceMode == swc::ImageSourceMode::playlistFile) {
+                        sources.reserve(playlistFileEntries.size());
+                        for (const auto& entry : playlistFileEntries) {
+                            sources.push_back(
+                                {std::filesystem::path(entry), 0});
+                        }
+                    } else {
+                        sources = FindSourceImages(
+                            settings.sourceDirectories, executableDirectory);
+                    }
+                    {
+                        const auto initialOrder = swc::PlaylistThumbnailPriorityOrder(
+                            sources.size(),
+                            initialFirstVisibleRow,
+                            initialVisibleRowCount);
+                        std::lock_guard<std::mutex> lock(schedule->mutex);
+                        schedule->pending.assign(initialOrder.size(), true);
+                        schedule->pendingRows.insert(
+                            schedule->pendingRows.end(),
+                            initialOrder.begin(),
+                            initialOrder.end());
+                        schedule->rowsReady = true;
+                    }
                     PlaylistRefreshPacket rowsPacket;
                     rowsPacket.kind = PlaylistRefreshPacket::Kind::rows;
                     rowsPacket.generation = generation;
@@ -2836,11 +4302,16 @@ void StartPlaylistRefresh(ResidentState& state) {
                             std::wstring,
                             std::shared_ptr<const PlaylistThumbnail>> generatedThumbnails;
 
-                        for (std::size_t rowIndex = 0;
-                             rowIndex < sources.size();
-                             ++rowIndex) {
-                            if (cancellation->load(std::memory_order_acquire)) {
-                                break;
+                        while (!cancellation->load(std::memory_order_acquire)) {
+                            std::size_t rowIndex = 0;
+                            {
+                                std::lock_guard<std::mutex> lock(schedule->mutex);
+                                if (schedule->pendingRows.empty()) {
+                                    break;
+                                }
+                                rowIndex = schedule->pendingRows.front();
+                                schedule->pendingRows.pop_front();
+                                schedule->pending[rowIndex] = false;
                             }
                             const auto& source = sources[rowIndex];
                             PlaylistRefreshPacket thumbnailPacket;
@@ -2911,6 +4382,9 @@ void StartPlaylistRefresh(ResidentState& state) {
     }
 }
 
+void UpdatePlaylistThumbnailPriorities(ResidentState& state, bool force = false);
+void SyncPlaylistEditControls(ResidentState& state);
+
 void ApplyPlaylistRows(ResidentState& state, PlaylistRefreshPacket& packet) {
     ListView_DeleteAllItems(state.playlistList);
     ImageList_RemoveAll(state.playlistImageList);
@@ -2978,8 +4452,88 @@ void ApplyPlaylistRows(ResidentState& state, PlaylistRefreshPacket& packet) {
     }
     SendMessageW(state.playlistList, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(state.playlistList, nullptr, TRUE);
-    RefreshPlaylistDisplayAssignments(state, packet.settings);
+    state.playlistRowsApplied = true;
+    UpdatePlaylistThumbnailPriorities(state, true);
+    const bool selectPendingRows =
+        !state.playlistPendingSelectionRows.empty() &&
+        state.playlistPendingSelectionGeneration == packet.generation;
+    RefreshPlaylistDisplayAssignments(
+        state, packet.settings, !selectPendingRows);
+    if (selectPendingRows) {
+        ListView_SetItemState(
+            state.playlistList, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        for (const std::size_t row : state.playlistPendingSelectionRows) {
+            if (row < state.playlistSources.size()) {
+                ListView_SetItemState(
+                    state.playlistList,
+                    static_cast<int>(row),
+                    LVIS_SELECTED,
+                    LVIS_SELECTED);
+            }
+        }
+        const std::size_t firstRow = state.playlistPendingSelectionRows.front();
+        if (firstRow < state.playlistSources.size()) {
+            const int item = static_cast<int>(firstRow);
+            ListView_EnsureVisible(state.playlistList, item, FALSE);
+            RECT client{};
+            RECT bounds{};
+            if (GetClientRect(state.playlistList, &client) &&
+                ListView_GetItemRect(state.playlistList, item, &bounds, LVIR_BOUNDS)) {
+                const int delta = client.top - bounds.top;
+                if (delta != 0) {
+                    ListView_Scroll(state.playlistList, 0, delta);
+                }
+            }
+        }
+        state.playlistPendingSelectionRows.clear();
+        state.playlistPendingSelectionGeneration = 0;
+    }
     SetPlaylistHint(state, true);
+    UpdatePlaylistThumbnailPriorities(state, true);
+    SyncPlaylistEditControls(state);
+}
+
+void UpdatePlaylistThumbnailPriorities(ResidentState& state, bool force) {
+    const auto schedule = state.playlistThumbnailSchedule;
+    if (!schedule || !state.playlistList || !state.playlistRowsApplied) {
+        return;
+    }
+
+    int firstVisibleRow = ListView_GetTopIndex(state.playlistList);
+    if (firstVisibleRow < 0) {
+        firstVisibleRow = 0;
+    }
+    const int visibleRowCount =
+        std::max(1, ListView_GetCountPerPage(state.playlistList));
+    if (!force &&
+        firstVisibleRow == state.playlistPriorityFirstVisibleRow &&
+        visibleRowCount == state.playlistPriorityVisibleRowCount) {
+        return;
+    }
+
+    const auto order = swc::PlaylistThumbnailPriorityOrder(
+        state.playlistSources.size(),
+        firstVisibleRow,
+        visibleRowCount);
+    {
+        std::lock_guard<std::mutex> lock(schedule->mutex);
+        std::deque<std::size_t> reorderedRows;
+        if (!schedule->rowsReady) {
+            schedule->pending.assign(order.size(), true);
+            reorderedRows.insert(
+                reorderedRows.end(), order.begin(), order.end());
+            schedule->rowsReady = true;
+        } else {
+            for (const std::size_t row : order) {
+                if (row < schedule->pending.size() && schedule->pending[row]) {
+                    reorderedRows.push_back(row);
+                }
+            }
+        }
+        schedule->pendingRows.swap(reorderedRows);
+    }
+    state.playlistPriorityFirstVisibleRow = firstVisibleRow;
+    state.playlistPriorityVisibleRowCount = visibleRowCount;
 }
 
 void ApplyPlaylistThumbnail(
@@ -3053,6 +4607,7 @@ void ProcessPlaylistPackets(ResidentState& state) {
                 state.playlistThread.join();
                 state.playlistRunning = false;
                 state.playlistCancel.reset();
+                state.playlistThumbnailSchedule.reset();
                 if (state.playlistRefreshPending && state.settingsWindow &&
                     TabCtrl_GetCurSel(state.settingsTabs) == 2) {
                     state.playlistRefreshPending = false;
@@ -3078,8 +4633,16 @@ void ProcessPlaylistPackets(ResidentState& state) {
                 }
             }
         } catch (const Failure& failure) {
+            if (packet.kind == PlaylistRefreshPacket::Kind::rows &&
+                state.playlistCancel) {
+                state.playlistCancel->store(true, std::memory_order_release);
+            }
             ShowError(failure.message, state.settingsWindow ? state.settingsWindow : state.window);
         } catch (const std::exception&) {
+            if (packet.kind == PlaylistRefreshPacket::Kind::rows &&
+                state.playlistCancel) {
+                state.playlistCancel->store(true, std::memory_order_release);
+            }
             ShowError(
                 L"Could not update the Playlist display.",
                 state.settingsWindow ? state.settingsWindow : state.window);
@@ -3096,6 +4659,208 @@ void SaveSourceDirectoryList(
     state.settings = std::move(updated);
     RefreshSourceDirectoryList(state);
     CancelPlaylistRefresh(state);
+}
+
+void ShowSettingsPage(ResidentState& state);
+void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeight);
+
+void SyncSourceModeControls(ResidentState& state) {
+    const bool folderMode =
+        state.settings.imageSourceMode == swc::ImageSourceMode::sourceFolders;
+    if (state.sourceFoldersModeRadio) {
+        SendMessageW(
+            state.sourceFoldersModeRadio,
+            BM_SETCHECK,
+            folderMode ? BST_CHECKED : BST_UNCHECKED,
+            0);
+    }
+    if (state.playlistFileModeRadio) {
+        SendMessageW(
+            state.playlistFileModeRadio,
+            BM_SETCHECK,
+            folderMode ? BST_UNCHECKED : BST_CHECKED,
+            0);
+    }
+    if (state.sourceDirectoryList) {
+        wchar_t folderColumnText[] = L"Source folder (drag rows to reorder)";
+        wchar_t playlistColumnText[] =
+            L"Recent playlist file (drag rows to reorder)";
+        LVCOLUMNW column{};
+        column.mask = LVCF_TEXT;
+        column.pszText = folderMode ? folderColumnText : playlistColumnText;
+        ListView_SetColumn(state.sourceDirectoryList, 0, &column);
+        RefreshSourceDirectoryList(state);
+    }
+    if (state.sourceListGroup) {
+        SetWindowTextW(
+            state.sourceListGroup,
+            folderMode ? L"Source folders" : L"Recent playlist files");
+    }
+    EnableWindow(state.sourceDirectoryList, TRUE);
+    if (state.sourceDirectoryHint) {
+        SetWindowTextW(
+            state.sourceDirectoryHint,
+            folderMode
+                ? L"Drop folders here to add them. Uncheck all folders to use the working folder."
+                : L"Check a playlist to use it. Drag rows to change their saved order.");
+    }
+    EnableWindow(state.sourceDirectoryHint, TRUE);
+    EnableWindow(
+        GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
+        folderMode);
+    EnableWindow(
+        GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId),
+        TRUE);
+    EnableWindow(state.newPlaylistFileButton, !folderMode);
+    EnableWindow(state.openPlaylistFileButton, !folderMode);
+    EnableWindow(state.saveAsPlaylistFileButton, !folderMode);
+    DragAcceptFiles(state.sourceDirectoryList, folderMode);
+}
+
+void SaveImageSourceMode(
+    ResidentState& state,
+    swc::ImageSourceMode mode,
+    HWND owner) {
+    auto updated = state.settings;
+    updated.imageSourceMode = mode;
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not save the image source mode.", owner);
+    }
+    SyncSourceModeControls(state);
+    ShowSettingsPage(state);
+    RECT client{};
+    if (GetClientRect(state.settingsWindow, &client)) {
+        LayoutSettingsWindow(
+            state,
+            client.right - client.left,
+            client.bottom - client.top);
+        RedrawWindow(
+            state.settingsWindow,
+            nullptr,
+            nullptr,
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    } else {
+        ShowError(
+            L"Could not update the Sources tab layout: " +
+                Win32Message(GetLastError()),
+            owner);
+    }
+}
+
+bool SavePlaylistFilePath(
+    ResidentState& state,
+    const std::filesystem::path& path,
+    std::vector<std::wstring> entries,
+    HWND owner,
+    bool updateRecentOrder = true) {
+    auto updated = state.settings;
+    std::error_code error;
+    const auto absolutePath = std::filesystem::absolute(path, error);
+    if (error) {
+        ShowError(
+            L"Could not resolve the selected playlist path: " +
+                FilesystemErrorText(error),
+            owner);
+        return false;
+    }
+    updated.playlistFilePath = absolutePath.wstring();
+    const auto previousRecentPlaylistFiles = updated.recentPlaylistFiles;
+    if (updateRecentOrder) {
+        swc::RememberPlaylistFile(
+            updated.recentPlaylistFiles, updated.playlistFilePath);
+    }
+    const bool recentPlaylistListChanged =
+        updated.recentPlaylistFiles != previousRecentPlaylistFiles;
+    const bool currentPlaylistChanged =
+        !swc::PlaylistPathsEqual(
+            state.settings.playlistFilePath, updated.playlistFilePath);
+    updated.recentPlaylistHistoryInitialized = true;
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        state.playlistFileEntries = std::move(entries);
+        if (recentPlaylistListChanged || currentPlaylistChanged) {
+            SyncSourceModeControls(state);
+        }
+        return true;
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not save the selected playlist file.", owner);
+    }
+    return false;
+}
+
+void PruneMissingRecentPlaylistFiles(ResidentState& state, HWND owner) {
+    auto updated = state.settings;
+    std::vector<std::wstring> existing;
+    existing.reserve(updated.recentPlaylistFiles.size());
+    for (const auto& playlistFile : updated.recentPlaylistFiles) {
+        std::filesystem::path path(playlistFile);
+        if (path.is_relative()) {
+            path = ExecutableDirectory() / path;
+        }
+        std::error_code error;
+        const bool regularFile = std::filesystem::is_regular_file(path, error);
+        if (error) {
+            ShowError(
+                L"Could not inspect a recent playlist file \"" + playlistFile +
+                    L"\": " + FilesystemErrorText(error),
+                owner);
+            return;
+        }
+        if (regularFile) {
+            existing.push_back(playlistFile);
+        }
+    }
+
+    bool currentPlaylistExists = true;
+    if (!updated.playlistFilePath.empty()) {
+        std::filesystem::path currentPath(updated.playlistFilePath);
+        if (currentPath.is_relative()) {
+            currentPath = ExecutableDirectory() / currentPath;
+        }
+        std::error_code error;
+        currentPlaylistExists =
+            std::filesystem::is_regular_file(currentPath, error);
+        if (error) {
+            ShowError(
+                L"Could not inspect the current playlist file: " +
+                    FilesystemErrorText(error),
+                owner);
+            return;
+        }
+    }
+    const bool clearCurrentPlaylist =
+        !currentPlaylistExists && !updated.playlistFilePath.empty();
+    const bool changed =
+        existing != updated.recentPlaylistFiles || clearCurrentPlaylist;
+    if (!changed) {
+        return;
+    }
+
+    updated.recentPlaylistFiles = std::move(existing);
+    if (clearCurrentPlaylist) {
+        updated.playlistFilePath.clear();
+    }
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        if (clearCurrentPlaylist) {
+            state.playlistFileEntries.clear();
+            state.playlistFileDirty = false;
+        }
+        RefreshSourceDirectoryList(state);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not remove missing playlist files from recent history.", owner);
+    }
 }
 
 HWND CreateSettingsControl(
@@ -3131,6 +4896,87 @@ HWND CreateSettingsControl(
     return control;
 }
 
+std::vector<std::filesystem::path> SelectPlaylistImportPaths(
+    HWND owner,
+    const std::filesystem::path& initialDirectory) {
+    ComPtr<IFileOpenDialog> dialog;
+    CheckHr(
+        CoCreateInstance(
+            CLSID_FileOpenDialog,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(dialog.Put())),
+        L"Could not open the image selection dialog");
+
+    static constexpr COMDLG_FILTERSPEC fileTypes[] = {
+        {L"Supported image files", L"*.jpg;*.jpeg;*.png;*.webp"}};
+    CheckHr(
+        dialog->SetFileTypes(
+            static_cast<UINT>(std::size(fileTypes)), fileTypes),
+        L"Could not configure the image selection dialog");
+
+    FILEOPENDIALOGOPTIONS options = 0;
+    CheckHr(
+        dialog->GetOptions(&options),
+        L"Could not configure the image selection dialog");
+    CheckHr(
+        dialog->SetOptions(
+            options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM |
+                FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR),
+        L"Could not configure the image selection dialog");
+    CheckHr(
+        dialog->SetTitle(L"Add images to playlist"),
+        L"Could not set the image selection dialog title");
+
+    if (!initialDirectory.empty()) {
+        ComPtr<IShellItem> initialFolder;
+        CheckHr(
+            SHCreateItemFromParsingName(
+                initialDirectory.c_str(),
+                nullptr,
+                IID_PPV_ARGS(initialFolder.Put())),
+            L"Could not locate the initial image folder");
+        CheckHr(
+            dialog->SetFolder(initialFolder.Get()),
+            L"Could not select the initial image folder");
+    }
+
+    const HRESULT showResult = dialog->Show(owner);
+    if (showResult == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        return {};
+    }
+    CheckHr(showResult, L"Could not show the image selection dialog");
+
+    ComPtr<IShellItemArray> selectedItems;
+    CheckHr(
+        dialog->GetResults(selectedItems.Put()),
+        L"Could not read the selected image files");
+    DWORD selectedCount = 0;
+    CheckHr(
+        selectedItems->GetCount(&selectedCount),
+        L"Could not count the selected image files");
+
+    std::vector<std::filesystem::path> selectedPaths;
+    selectedPaths.reserve(selectedCount);
+    for (DWORD index = 0; index < selectedCount; ++index) {
+        ComPtr<IShellItem> selectedItem;
+        CheckHr(
+            selectedItems->GetItemAt(index, selectedItem.Put()),
+            L"Could not read a selected image file");
+        PWSTR rawPath = nullptr;
+        CheckHr(
+            selectedItem->GetDisplayName(SIGDN_FILESYSPATH, &rawPath),
+            L"Could not read a selected image file path");
+        std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> selectedPath(
+            rawPath, CoTaskMemFree);
+        if (!selectedPath) {
+            Fail(L"A selected image file path is empty.");
+        }
+        selectedPaths.emplace_back(selectedPath.get());
+    }
+    return selectedPaths;
+}
+
 void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeight) {
     if (!state.settingsTabs) {
         return;
@@ -3149,82 +4995,234 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
         }
     };
 
+    const auto naturalActionButtonWidth = [&](HWND button) {
+        wchar_t text[64]{};
+        if (GetWindowTextW(button, text, static_cast<int>(std::size(text))) == 0) {
+            ShowError(
+                L"Could not read a Sources action button label.",
+                state.settingsWindow);
+            return -1;
+        }
+        HDC dc = GetDC(state.settingsWindow);
+        if (!dc) {
+            ShowError(
+                L"Could not measure a Sources action button label.",
+                state.settingsWindow);
+            return -1;
+        }
+        HGDIOBJ previousFont = SelectObject(dc, state.settingsFont);
+        SIZE textSize{};
+        const BOOL measured = GetTextExtentPoint32W(
+            dc,
+            text,
+            static_cast<int>(std::wcslen(text)),
+            &textSize);
+        SelectObject(dc, previousFont);
+        ReleaseDC(state.settingsWindow, dc);
+        if (!measured) {
+            ShowError(
+                L"Could not measure a Sources action button label.",
+                state.settingsWindow);
+            return -1;
+        }
+        constexpr int iconSlotWidth = 30;
+        constexpr int iconTextGap = 4;
+        constexpr int horizontalPadding = 8;
+        return static_cast<int>(textSize.cx) +
+            iconSlotWidth + iconTextGap + 2 * horizontalPadding;
+    };
+
     const int contentWidth = std::max(1, clientWidth - 24);
     const int footerY = std::max(0, clientHeight - 44);
     const int tabsY = 145;
-    moveControl(state.monitorPreviewPanel, 12, 12, contentWidth, 125);
+    moveControl(state.countdownDisplay, 12, 40, 220, 42);
+    const int countdownButtonWidth = 30;
+    const int countdownButtonGap = 4;
+    const int countdownButtonsWidth =
+        5 * countdownButtonWidth + 4 * countdownButtonGap;
+    const int countdownButtonsX = 12 + (220 - countdownButtonsWidth) / 2;
+    moveControl(state.countdownPreviousButton, countdownButtonsX, 86,
+        countdownButtonWidth, 30);
+    moveControl(state.countdownStartStopButton,
+        countdownButtonsX + countdownButtonWidth + countdownButtonGap,
+        86, countdownButtonWidth, 30);
+    moveControl(state.countdownPauseResumeButton,
+        countdownButtonsX + 2 * (countdownButtonWidth + countdownButtonGap),
+        86, countdownButtonWidth, 30);
+    moveControl(state.countdownRestartButton,
+        countdownButtonsX + 3 * (countdownButtonWidth + countdownButtonGap),
+        86, countdownButtonWidth, 30);
+    moveControl(state.countdownNextButton,
+        countdownButtonsX + 4 * (countdownButtonWidth + countdownButtonGap),
+        86, countdownButtonWidth, 30);
+    moveControl(state.monitorPreviewPanel, 242, 12, contentWidth - 230, 125);
     moveControl(
         state.settingsTabs,
         12,
         tabsY,
         contentWidth,
         std::max(1, footerY - 12 - tabsY));
+    moveControl(state.sourceFoldersModeRadio, 28, 174, 180, 28);
+    moveControl(state.playlistFileModeRadio, 220, 174, 180, 28);
+    const int sourceActionY = clientHeight - 100;
+    const int sourceGroupTop = 207;
+    const int sourceGroupBottom = sourceActionY - 12;
+    moveControl(
+        state.sourceListGroup,
+        20,
+        sourceGroupTop,
+        clientWidth - 40,
+        sourceGroupBottom - sourceGroupTop);
+    const int sourceListLeft = 30;
+    const int sourceListTop = sourceGroupTop + 28;
+    const int sourceHintHeight = 32;
+    const int sourceHintBottom = sourceGroupBottom - 12;
+    const int sourceHintY = sourceHintBottom - sourceHintHeight;
+    const int sourceListBottom = sourceHintY - 8;
     moveControl(
         state.sourceDirectoryList,
-        28,
-        186,
-        clientWidth - 56,
-        clientHeight - 171 - 14 - 186);
-    moveControl(
-        GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
-        28,
-        clientHeight - 171,
-        130,
-        32);
-    moveControl(
-        GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId),
-        172,
-        clientHeight - 171,
-        110,
-        32);
+        sourceListLeft,
+        sourceListTop,
+        clientWidth - 2 * sourceListLeft,
+        sourceListBottom - sourceListTop);
+    if (state.sourceDirectoryList) {
+        ListView_SetColumnWidth(
+            state.sourceDirectoryList,
+            0,
+            std::max(1, clientWidth - 2 * sourceListLeft - 24));
+    }
     moveControl(
         state.sourceDirectoryHint,
-        28,
-        clientHeight - 129,
-        clientWidth - 56,
-        36);
+        sourceListLeft + 2,
+        sourceHintY,
+        clientWidth - 2 * sourceListLeft - 4,
+        sourceHintHeight);
+    const int sourceActionGap = 8;
+    const int sourceActionX = 28;
+    const bool folderSourceMode =
+        state.settings.imageSourceMode == swc::ImageSourceMode::sourceFolders;
+    if (folderSourceMode) {
+        const int addButtonWidth = naturalActionButtonWidth(
+            GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId));
+        const int removeButtonWidth = naturalActionButtonWidth(
+            GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId));
+        if (addButtonWidth > 0 && removeButtonWidth > 0) {
+            moveControl(
+                GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
+                sourceActionX,
+                sourceActionY,
+                addButtonWidth,
+                32);
+            moveControl(
+                GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId),
+                sourceActionX + addButtonWidth + sourceActionGap,
+                sourceActionY,
+                removeButtonWidth,
+                32);
+        }
+    } else {
+        const int newButtonWidth =
+            naturalActionButtonWidth(state.newPlaylistFileButton);
+        const int openButtonWidth =
+            naturalActionButtonWidth(state.openPlaylistFileButton);
+        const int saveAsButtonWidth =
+            naturalActionButtonWidth(state.saveAsPlaylistFileButton);
+        const int removeButtonWidth = naturalActionButtonWidth(
+            GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId));
+        if (newButtonWidth > 0 &&
+            openButtonWidth > 0 &&
+            saveAsButtonWidth > 0 &&
+            removeButtonWidth > 0) {
+            const int buttonWidths[] = {
+                newButtonWidth,
+                openButtonWidth,
+                saveAsButtonWidth,
+                removeButtonWidth};
+            const HWND buttons[] = {
+                state.newPlaylistFileButton,
+                state.openPlaylistFileButton,
+                state.saveAsPlaylistFileButton,
+                GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId)};
+            int buttonX = sourceActionX;
+            for (std::size_t index = 0; index < std::size(buttons); ++index) {
+                moveControl(
+                    buttons[index],
+                    buttonX,
+                    sourceActionY,
+                    buttonWidths[index],
+                    32);
+                buttonX += buttonWidths[index] + sourceActionGap;
+            }
+        }
+    }
     moveControl(
         state.playlistList,
         28,
         186,
         clientWidth - 56,
-        clientHeight - 295);
+        clientHeight - 336);
     moveControl(
         state.playlistHint,
         28,
-        clientHeight - 99,
+        clientHeight - 138,
         clientWidth - 56,
         28);
+    const HWND playlistActionButtons[] = {
+        state.playlistAddFilesButton,
+        state.playlistAddFolderButton,
+        state.playlistRemoveButton,
+        state.playlistDeleteButton,
+        state.playlistRemoveDuplicatesButton};
+    int playlistActionX = 28;
+    for (const HWND button : playlistActionButtons) {
+        const int buttonWidth = naturalActionButtonWidth(button);
+        if (buttonWidth > 0) {
+            moveControl(button, playlistActionX, clientHeight - 104, buttonWidth, 32);
+            playlistActionX += buttonWidth + 8;
+        }
+    }
     moveControl(state.backgroundFillModeLabel, 30, 190, clientWidth - 60, 28);
     moveControl(state.backgroundFillColorModeRadio, 30, 222, 500, 28);
     moveControl(state.backgroundFillColorLabel, 58, 260, 122, 28);
     moveControl(state.backgroundFillColorButton, 180, 253, 180, 42);
     moveControl(state.backgroundAdaptiveModeRadio, 30, 306, 600, 28);
-    moveControl(state.imageResizeToRadio, 30, 190, clientWidth - 60, 28);
-    moveControl(state.imageResizeToPercentLabel, 58, 226, 168, 26);
-    moveControl(state.imageResizeToPercentEdit, 230, 221, 64, 27);
-    moveControl(state.imageResizeToPercentUnitLabel, 300, 226, 24, 26);
-    moveControl(state.imageAutoFitRadio, 30, 263, clientWidth - 60, 28);
+    moveControl(state.multiMonitorSettingsGroup, 20, 180, clientWidth - 40, 82);
+    moveControl(state.sameImageOnDisplaysRadio, 40, 204, 340, 28);
+    moveControl(state.separateImagesOnDisplaysRadio, 390, 204, clientWidth - 420, 28);
+    moveControl(state.imagePlacementGroup, 20, 268, clientWidth - 40, 306);
+    moveControl(state.imageResizeToRadio, 40, 288, clientWidth - 80, 28);
+    moveControl(state.imageResizeToPercentLabel, 68, 321, 168, 26);
+    moveControl(state.imageResizeToPercentEdit, 240, 316, 64, 27);
+    moveControl(state.imageResizeToPercentUnitLabel, 310, 321, 24, 26);
+    moveControl(state.imageAutoFitRadio, 40, 349, clientWidth - 80, 28);
     const int imageGroupWidth = std::max(300, (clientWidth - 80) / 2);
     const int imageLargeGroupX = clientWidth - 30 - imageGroupWidth;
-    moveControl(state.imageSmallGroup, 30, 300, imageGroupWidth, 220);
-    moveControl(state.imageSmallCenteredRadio, 50, 326, imageGroupWidth - 40, 28);
-    moveControl(state.imageSmallTileRadio, 50, 360, imageGroupWidth - 40, 28);
-    moveControl(state.imageSmallFitRadio, 50, 394, imageGroupWidth - 40, 28);
-    moveControl(state.imageMaxEnlargeLabel, 72, 432, 170, 26);
-    moveControl(state.imageMaxEnlargePercentEdit, 247, 427, 64, 27);
-    moveControl(state.imageMaxEnlargePercentLabel, 315, 432, 32, 26);
+    moveControl(state.imageSmallGroup, 30, 380, imageGroupWidth, 176);
+    moveControl(state.imageSmallCenteredRadio, 50, 403, imageGroupWidth - 40, 28);
+    moveControl(state.imageSmallTileRadio, 50, 433, imageGroupWidth - 40, 28);
+    moveControl(state.imageSmallFitRadio, 50, 463, imageGroupWidth - 40, 28);
+    moveControl(state.imageMaxEnlargeLabel, 72, 497, 170, 26);
+    moveControl(state.imageMaxEnlargePercentEdit, 247, 492, 64, 27);
+    moveControl(state.imageMaxEnlargePercentLabel, 315, 497, 32, 26);
     moveControl(
-        state.imageLargeGroup, imageLargeGroupX, 300, imageGroupWidth, 220);
+        state.imageLargeGroup, imageLargeGroupX, 380, imageGroupWidth, 176);
     moveControl(
         state.imageLargeCenteredRadio,
-        imageLargeGroupX + 20, 326, imageGroupWidth - 40, 28);
+        imageLargeGroupX + 20, 403, imageGroupWidth - 40, 28);
     moveControl(
         state.imageLargeFillRadio,
-        imageLargeGroupX + 20, 360, imageGroupWidth - 40, 28);
+        imageLargeGroupX + 20, 433, imageGroupWidth - 40, 28);
     moveControl(
         state.imageLargeFitRadio,
-        imageLargeGroupX + 20, 394, imageGroupWidth - 40, 28);
+        imageLargeGroupX + 20, 463, imageGroupWidth - 40, 28);
+    moveControl(state.countdownEnabledCheckbox, 30, 190, clientWidth - 60, 28);
+    moveControl(state.countdownDurationGroup, 20, 232, clientWidth - 40, 104);
+    moveControl(state.countdownHoursLabel, 50, 260, 120, 24);
+    moveControl(state.countdownHoursEdit, 50, 286, 120, 30);
+    moveControl(state.countdownMinutesLabel, 250, 260, 120, 24);
+    moveControl(state.countdownMinutesEdit, 250, 286, 120, 30);
+    moveControl(state.countdownSecondsLabel, 450, 260, 120, 24);
+    moveControl(state.countdownSecondsEdit, 450, 286, 120, 30);
     moveControl(
         GetDlgItem(state.settingsWindow, kExitSettingsButtonId),
         clientWidth - 28 - 82 - 10 - 82,
@@ -3378,6 +5376,20 @@ void SyncImageSizingControls(ResidentState& state) {
         state.settings.largeImageMode == swc::LargeImageMode::fit
             ? BST_CHECKED : BST_UNCHECKED,
         0);
+    SendMessageW(
+        state.sameImageOnDisplaysRadio,
+        BM_SETCHECK,
+        state.settings.multiMonitorImageMode ==
+                swc::MultiMonitorImageMode::sameImage
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
+    SendMessageW(
+        state.separateImagesOnDisplaysRadio,
+        BM_SETCHECK,
+        state.settings.multiMonitorImageMode ==
+                swc::MultiMonitorImageMode::separateImages
+            ? BST_CHECKED : BST_UNCHECKED,
+        0);
 
     EnableWindow(state.imageResizeToPercentEdit, resizeTo);
     EnableWindow(state.imageResizeToPercentLabel, resizeTo);
@@ -3405,21 +5417,60 @@ void SyncImageSizingControls(ResidentState& state) {
     }
 }
 
+void SyncPlaylistEditControls(ResidentState& state);
+
 void ShowSettingsPage(ResidentState& state) {
     const int page = TabCtrl_GetCurSel(state.settingsTabs);
     const bool startupPage = page == 0;
     const bool sourcesPage = page == 1;
     const bool backgroundPage = page == 3;
+    const bool countdownPage = page == 5;
+    if (sourcesPage) {
+        PruneMissingRecentPlaylistFiles(state, state.settingsWindow);
+    }
     ShowWindow(state.changeOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.openWindowOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.startWithWindowsCheckbox, startupPage ? SW_SHOW : SW_HIDE);
+    const bool folderSourcePage = sourcesPage &&
+        state.settings.imageSourceMode == swc::ImageSourceMode::sourceFolders;
+    const bool playlistFileSourcePage = sourcesPage && !folderSourcePage;
+    ShowWindow(state.sourceFoldersModeRadio, sourcesPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.playlistFileModeRadio, sourcesPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.sourceListGroup, sourcesPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.sourceDirectoryList, sourcesPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.sourceDirectoryHint, sourcesPage ? SW_SHOW : SW_HIDE);
     ShowWindow(GetDlgItem(state.settingsWindow, kAddSourceDirectoryButtonId),
-        sourcesPage ? SW_SHOW : SW_HIDE);
+        folderSourcePage ? SW_SHOW : SW_HIDE);
     ShowWindow(GetDlgItem(state.settingsWindow, kRemoveSourceDirectoryButtonId),
         sourcesPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.newPlaylistFileButton,
+        playlistFileSourcePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.openPlaylistFileButton,
+        playlistFileSourcePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.saveAsPlaylistFileButton,
+        playlistFileSourcePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.playlistList, page == 2 ? SW_SHOW : SW_HIDE);
     ShowWindow(state.playlistHint, page == 2 ? SW_SHOW : SW_HIDE);
+    const bool playlistFilePage =
+        page == 2 &&
+        state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile;
+    ShowWindow(
+        state.playlistAddFilesButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistAddFolderButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistRemoveButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistDeleteButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistRemoveDuplicatesButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.backgroundFillModeLabel, backgroundPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.backgroundFillColorModeRadio, backgroundPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.backgroundAdaptiveModeRadio, backgroundPage ? SW_SHOW : SW_HIDE);
@@ -3432,6 +5483,10 @@ void ShowSettingsPage(ResidentState& state) {
         EnableWindow(state.backgroundFillColorButton, fillColorMode);
     }
     const bool imagePage = page == 4;
+    ShowWindow(state.multiMonitorSettingsGroup, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.imagePlacementGroup, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.sameImageOnDisplaysRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.separateImagesOnDisplaysRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageResizeToRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageAutoFitRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageResizeToPercentEdit, imagePage ? SW_SHOW : SW_HIDE);
@@ -3448,7 +5503,19 @@ void ShowSettingsPage(ResidentState& state) {
     ShowWindow(state.imageLargeCenteredRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageLargeFillRadio, imagePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.imageLargeFitRadio, imagePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownEnabledCheckbox, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownDurationGroup, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownHoursLabel, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownMinutesLabel, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownSecondsLabel, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownHoursEdit, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownMinutesEdit, countdownPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.countdownSecondsEdit, countdownPage ? SW_SHOW : SW_HIDE);
+    SyncSourceModeControls(state);
     SyncImageSizingControls(state);
+    SyncCountdownControls(state);
+    RefreshCountdownDisplay(state);
+    SyncPlaylistEditControls(state);
 }
 
 void SaveSourceDirectoryListWithError(
@@ -3518,25 +5585,70 @@ void AddSourceDirectories(
     }
 }
 
+void SaveRecentPlaylistListWithError(
+    ResidentState& state,
+    std::vector<std::wstring> playlistFiles,
+    HWND owner) {
+    auto updated = state.settings;
+    updated.recentPlaylistFiles = std::move(playlistFiles);
+    updated.recentPlaylistHistoryInitialized = true;
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        RefreshSourceDirectoryList(state);
+    } catch (const Failure& failure) {
+        RefreshSourceDirectoryList(state);
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        RefreshSourceDirectoryList(state);
+        ShowError(L"Could not save the recent playlist file list.", owner);
+    }
+}
+
 void ReorderSourceDirectory(
     ResidentState& state,
     int from,
     int insertionIndex,
     HWND owner) {
-    auto directories = state.settings.sourceDirectories;
-    if (from < 0 || static_cast<std::size_t>(from) >= directories.size()) {
+    if (state.settings.imageSourceMode == swc::ImageSourceMode::sourceFolders) {
+        auto directories = state.settings.sourceDirectories;
+        if (from < 0 || static_cast<std::size_t>(from) >= directories.size()) {
+            return;
+        }
+        insertionIndex = std::clamp(
+            insertionIndex, 0, static_cast<int>(directories.size()));
+        auto directory = std::move(directories[static_cast<std::size_t>(from)]);
+        directories.erase(directories.begin() + from);
+        if (from < insertionIndex) {
+            --insertionIndex;
+        }
+        insertionIndex = std::clamp(
+            insertionIndex, 0, static_cast<int>(directories.size()));
+        directories.insert(
+            directories.begin() + insertionIndex, std::move(directory));
+        if (directories != state.settings.sourceDirectories) {
+            SaveSourceDirectoryListWithError(state, std::move(directories), owner);
+        }
         return;
     }
-    insertionIndex = std::clamp(insertionIndex, 0, static_cast<int>(directories.size()));
-    auto directory = std::move(directories[static_cast<std::size_t>(from)]);
-    directories.erase(directories.begin() + from);
+
+    auto playlistFiles = state.settings.recentPlaylistFiles;
+    if (from < 0 || static_cast<std::size_t>(from) >= playlistFiles.size()) {
+        return;
+    }
+    insertionIndex = std::clamp(
+        insertionIndex, 0, static_cast<int>(playlistFiles.size()));
+    auto playlistFile = std::move(playlistFiles[static_cast<std::size_t>(from)]);
+    playlistFiles.erase(playlistFiles.begin() + from);
     if (from < insertionIndex) {
         --insertionIndex;
     }
-    insertionIndex = std::clamp(insertionIndex, 0, static_cast<int>(directories.size()));
-    directories.insert(directories.begin() + insertionIndex, std::move(directory));
-    if (directories != state.settings.sourceDirectories) {
-        SaveSourceDirectoryListWithError(state, std::move(directories), owner);
+    insertionIndex = std::clamp(
+        insertionIndex, 0, static_cast<int>(playlistFiles.size()));
+    playlistFiles.insert(
+        playlistFiles.begin() + insertionIndex, std::move(playlistFile));
+    if (playlistFiles != state.settings.recentPlaylistFiles) {
+        SaveRecentPlaylistListWithError(state, std::move(playlistFiles), owner);
     }
 }
 
@@ -3671,14 +5783,401 @@ std::wstring SelectSourceDirectory(HWND owner, const std::wstring& currentDirect
     return selectedPath.get();
 }
 
-void StartWallpaperChange(ResidentState& state, WallpaperRequest request = {});
+std::filesystem::path SelectPlaylistFile(
+    HWND owner,
+    const std::filesystem::path& initialPath,
+    bool save) {
+    std::vector<wchar_t> fileName(32768, L'\0');
+    if (!initialPath.empty()) {
+        const std::wstring initialName = initialPath.filename().wstring();
+        if (initialName.size() < fileName.size()) {
+            std::copy(initialName.begin(), initialName.end(), fileName.begin());
+        }
+    }
 
-void RequestBackgroundReapply(ResidentState& state) {
-    if (state.changeRunning) {
-        state.backgroundReapplyPending = true;
+    static constexpr wchar_t filter[] =
+        L"Playlist files (*.txt)\0*.txt\0All files (*.*)\0*.*\0\0";
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = owner;
+    dialog.lpstrFilter = filter;
+    dialog.nFilterIndex = 1;
+    dialog.lpstrFile = fileName.data();
+    dialog.nMaxFile = static_cast<DWORD>(fileName.size());
+    const auto initialDirectory = initialPath.empty()
+        ? ExecutableDirectory()
+        : initialPath.parent_path();
+    dialog.lpstrInitialDir = initialDirectory.c_str();
+    dialog.lpstrDefExt = L"txt";
+    dialog.Flags = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST |
+        OFN_HIDEREADONLY;
+
+    if (!save) {
+        dialog.Flags |= OFN_FILEMUSTEXIST;
+    }
+    const BOOL selected = save
+        ? GetSaveFileNameW(&dialog)
+        : GetOpenFileNameW(&dialog);
+    if (!selected) {
+        const DWORD error = CommDlgExtendedError();
+        if (error != 0) {
+            Fail(L"Could not open the playlist file dialog: " +
+                Win32Message(error));
+        }
+        return {};
+    }
+    return std::filesystem::path(fileName.data());
+}
+
+bool ConfirmPlaylistOverwrite(
+    HWND owner,
+    const std::filesystem::path& path,
+    bool replacingWithEmptyPlaylist) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) {
+        ShowError(
+            L"Could not inspect the selected playlist file: " +
+                FilesystemErrorText(error),
+            owner);
+        return false;
+    }
+    if (!exists) {
+        return true;
+    }
+    const std::wstring message = replacingWithEmptyPlaylist
+        ? L"The file already exists. Replace it with an empty playlist?\r\n\r\n" +
+            path.wstring()
+        : L"The file already exists. Overwrite its contents with this playlist?\r\n\r\n" +
+            path.wstring();
+    return MessageBoxW(
+        owner,
+        message.c_str(),
+        L"Confirm playlist overwrite",
+        MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES;
+}
+
+void CreateNewPlaylistFile(ResidentState& state, HWND owner) {
+    try {
+        const auto initialPath =
+            ExecutableDirectory() / L"New Playlist.txt";
+        const auto selectedPath =
+            SelectPlaylistFile(owner, initialPath, true);
+        if (selectedPath.empty() ||
+            !ConfirmPlaylistOverwrite(owner, selectedPath, true)) {
+            return;
+        }
+        WritePlaylistFile(selectedPath, {});
+        if (!SavePlaylistFilePath(state, selectedPath, {}, owner)) {
+            return;
+        }
+        state.playlistFileDirty = false;
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not create the new playlist file.", owner);
+    }
+}
+
+bool ActivatePlaylistFile(
+    ResidentState& state,
+    const std::filesystem::path& selectedPath,
+    HWND owner,
+    bool updateRecentOrder = true) {
+    if (state.playlistFileDirty && !state.settings.playlistFilePath.empty()) {
+        WritePlaylistFile(
+            state.settings.playlistFilePath,
+            state.playlistFileEntries);
+        state.playlistFileDirty = false;
+    }
+
+    auto resolvedPath = selectedPath;
+    if (resolvedPath.is_relative()) {
+        resolvedPath = ExecutableDirectory() / resolvedPath;
+    }
+    auto contents = ReadPlaylistFile(resolvedPath);
+    if (contents.invalidLineCount > 0) {
+        const std::wstring message =
+            L"This file might not be a valid playlist. It contains " +
+            std::to_wstring(contents.imagePaths.size()) +
+            L" valid image line(s) and " +
+            std::to_wstring(contents.invalidLineCount) +
+            L" invalid line(s). Continue and remove the invalid lines?";
+        if (MessageBoxW(
+                owner,
+                message.c_str(),
+                L"Confirm playlist cleanup",
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+            return false;
+        }
+        WritePlaylistFile(resolvedPath, contents.imagePaths);
+    }
+    if (!SavePlaylistFilePath(
+            state,
+            resolvedPath,
+            std::move(contents.imagePaths),
+            owner,
+            updateRecentOrder)) {
+        return false;
+    }
+    state.playlistFileDirty = false;
+    return true;
+}
+
+void ActivateRecentPlaylistRow(
+    ResidentState& state,
+    int row,
+    HWND owner) {
+    if (row < 0 ||
+        static_cast<std::size_t>(row) >=
+            state.settings.recentPlaylistFiles.size()) {
         return;
     }
-    StartWallpaperChange(state, WallpaperRequest{false, {}, {}, true});
+    const auto selectedPath =
+        state.settings.recentPlaylistFiles[static_cast<std::size_t>(row)];
+    if (swc::PlaylistPathsEqual(
+            selectedPath, state.settings.playlistFilePath)) {
+        return;
+    }
+    try {
+        if (!ActivatePlaylistFile(state, selectedPath, owner, false)) {
+            RefreshSourceDirectoryList(state);
+        }
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+        RefreshSourceDirectoryList(state);
+    } catch (const std::exception&) {
+        ShowError(L"Could not activate the selected playlist file.", owner);
+        RefreshSourceDirectoryList(state);
+    }
+}
+
+void OpenPlaylistFile(ResidentState& state, HWND owner) {
+    try {
+        const auto selectedPath = SelectPlaylistFile(
+            owner,
+            std::filesystem::path(state.settings.playlistFilePath),
+            false);
+        if (selectedPath.empty()) {
+            return;
+        }
+        ActivatePlaylistFile(state, selectedPath, owner);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not open the selected playlist file.", owner);
+    }
+}
+
+void SaveAsPlaylistFile(ResidentState& state, HWND owner) {
+    try {
+        const auto selectedPath = SelectPlaylistFile(
+            owner,
+            std::filesystem::path(state.settings.playlistFilePath),
+            true);
+        if (selectedPath.empty() ||
+            !ConfirmPlaylistOverwrite(owner, selectedPath, false)) {
+            return;
+        }
+        WritePlaylistFile(selectedPath, state.playlistFileEntries);
+        if (!SavePlaylistFilePath(
+                state,
+                selectedPath,
+                state.playlistFileEntries,
+                owner)) {
+            return;
+        }
+        state.playlistFileDirty = false;
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not save a copy of the playlist.", owner);
+    }
+}
+
+void StartWallpaperChange(ResidentState& state, WallpaperRequest request = {});
+
+void ResetCountdown(ResidentState& state) {
+    state.countdownRemainingSeconds = swc::CountdownDurationSeconds(state.settings);
+    state.countdownPaused = false;
+    if (state.settings.countdownEnabled) {
+        state.countdownDeadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(state.countdownRemainingSeconds);
+    }
+    SyncCountdownControls(state);
+    RefreshCountdownDisplay(state);
+    if (state.countdownPauseResumeButton) {
+        InvalidateRect(state.countdownPauseResumeButton, nullptr, TRUE);
+    }
+}
+
+void StartOrStopCountdown(
+    ResidentState& state,
+    bool enabled,
+    HWND owner) {
+    auto updated = state.settings;
+    updated.countdownEnabled = enabled;
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        if (!enabled) {
+            state.timerNextPending = false;
+        }
+        ResetCountdown(state);
+    } catch (const Failure& failure) {
+        SyncCountdownControls(state);
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        SyncCountdownControls(state);
+        ShowError(L"Could not save the Countdown settings.", owner);
+    }
+}
+
+void ToggleCountdownPause(ResidentState& state) {
+    if (!state.settings.countdownEnabled) {
+        return;
+    }
+    if (!state.countdownPaused) {
+        const std::uint32_t remaining = CurrentCountdownSeconds(state);
+        if (remaining == 0) {
+            ResetCountdown(state);
+            if (state.changeRunning) {
+                state.timerNextPending = true;
+            } else {
+                StartWallpaperChange(state);
+            }
+            return;
+        }
+        state.countdownRemainingSeconds = remaining;
+        state.countdownPaused = true;
+    } else {
+        state.countdownPaused = false;
+        state.countdownDeadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(state.countdownRemainingSeconds);
+    }
+    SyncCountdownControls(state);
+    RefreshCountdownDisplay(state);
+    if (state.countdownPauseResumeButton) {
+        InvalidateRect(state.countdownPauseResumeButton, nullptr, TRUE);
+    }
+}
+
+std::wstring ReadEditText(HWND edit) {
+    const int length = GetWindowTextLengthW(edit);
+    std::wstring text(static_cast<std::size_t>(std::max(0, length)) + 1, L'\0');
+    const int copied = GetWindowTextW(
+        edit, text.data(), static_cast<int>(text.size()));
+    text.resize(static_cast<std::size_t>(std::max(0, copied)));
+    return text;
+}
+
+bool IsCountdownDurationEditId(int controlId) {
+    return controlId == kCountdownHoursEditId ||
+        controlId == kCountdownMinutesEditId ||
+        controlId == kCountdownSecondsEditId;
+}
+
+void SaveCountdownDuration(
+    ResidentState& state,
+    HWND owner,
+    bool force = false) {
+    const HWND focused = GetFocus();
+    if (!force && focused &&
+        IsCountdownDurationEditId(GetDlgCtrlID(focused))) {
+        return;
+    }
+
+    const std::wstring hours = ReadEditText(state.countdownHoursEdit);
+    const std::wstring minutes = ReadEditText(state.countdownMinutesEdit);
+    const std::wstring seconds = ReadEditText(state.countdownSecondsEdit);
+    std::uint32_t totalSeconds = 0;
+    if (!swc::ParseCountdownDuration(hours, minutes, seconds, totalSeconds)) {
+        ShowError(
+            L"Countdown time must be greater than zero. Hours must be 0-99; "
+            L"minutes and seconds must be 0-59.",
+            owner);
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+        return;
+    }
+
+    auto updated = state.settings;
+    swc::ParsePercent(hours, 0, 99, updated.countdownHours);
+    swc::ParsePercent(minutes, 0, 59, updated.countdownMinutes);
+    swc::ParsePercent(seconds, 0, 59, updated.countdownSeconds);
+    try {
+        UpdateUserSettings(state.settingsPath, updated);
+        state.settings = std::move(updated);
+        state.countdownRemainingSeconds = totalSeconds;
+        if (state.settings.countdownEnabled && !state.countdownPaused) {
+            state.countdownDeadline =
+                std::chrono::steady_clock::now() +
+                std::chrono::seconds(totalSeconds);
+        }
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+    } catch (const Failure& failure) {
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        SyncCountdownControls(state);
+        RefreshCountdownDisplay(state);
+        ShowError(L"Could not save the Countdown duration.", owner);
+    }
+}
+
+void RequestNextOrPrevious(
+    ResidentState& state,
+    bool previous,
+    bool fromCountdown = false) {
+    if (state.settings.countdownEnabled) {
+        ResetCountdown(state);
+    }
+    if (state.changeRunning) {
+        if (fromCountdown) {
+            state.timerNextPending = true;
+        } else {
+            ShowError(L"A wallpaper change is already in progress.", state.window);
+        }
+        return;
+    }
+    StartWallpaperChange(
+        state, previous ? WallpaperRequest{true, {}, {}} : WallpaperRequest{});
+}
+
+void ProcessCountdownTick(ResidentState& state) {
+    if (!state.settings.countdownEnabled || state.countdownPaused) {
+        RefreshCountdownDisplay(state);
+        return;
+    }
+    if (CurrentCountdownSeconds(state) > 0) {
+        RefreshCountdownDisplay(state);
+        return;
+    }
+
+    ResetCountdown(state);
+    if (state.changeRunning) {
+        state.timerNextPending = true;
+        return;
+    }
+    StartWallpaperChange(state);
+}
+
+void RequestBackgroundReapply(
+    ResidentState& state,
+    bool reapplyMultiMonitorMode = false) {
+    if (state.changeRunning) {
+        state.backgroundReapplyPending = true;
+        state.multiMonitorModeReapplyPending =
+            state.multiMonitorModeReapplyPending || reapplyMultiMonitorMode;
+        return;
+    }
+    StartWallpaperChange(
+        state,
+        WallpaperRequest{false, {}, {}, true, reapplyMultiMonitorMode});
 }
 
 void SaveBackgroundSettings(
@@ -3746,10 +6245,12 @@ void SaveImageSettings(
     swc::Settings updated,
     HWND owner) {
     try {
+        const bool multiMonitorModeChanged =
+            updated.multiMonitorImageMode != state.settings.multiMonitorImageMode;
         UpdateUserSettings(state.settingsPath, updated);
         state.settings = std::move(updated);
         SyncImageSizingControls(state);
-        RequestBackgroundReapply(state);
+        RequestBackgroundReapply(state, multiMonitorModeChanged);
     } catch (const Failure& failure) {
         SyncImageSizingControls(state);
         ShowError(failure.message, owner);
@@ -3823,11 +6324,422 @@ void ChooseBackgroundFillColor(ResidentState& state, HWND owner) {
     SaveBackgroundSettings(state, std::move(updated), owner);
 }
 
-void ShowPlaylistContextMenu(ResidentState& state, int row) {
+std::vector<int> SelectedPlaylistRows(const ResidentState& state) {
+    std::vector<int> rows;
+    if (!state.playlistList) {
+        return rows;
+    }
+    for (int row = ListView_GetNextItem(state.playlistList, -1, LVNI_SELECTED);
+         row >= 0;
+         row = ListView_GetNextItem(state.playlistList, row, LVNI_SELECTED)) {
+        if (static_cast<std::size_t>(row) < state.playlistSources.size()) {
+            rows.push_back(row);
+        }
+    }
+    return rows;
+}
+
+void SyncPlaylistEditControls(ResidentState& state) {
+    const bool enabled =
+        state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile &&
+        !SelectedPlaylistRows(state).empty();
+    for (const HWND button : {
+             state.playlistRemoveButton,
+             state.playlistDeleteButton}) {
+        if (button) {
+            EnableWindow(button, enabled);
+            InvalidateRect(button, nullptr, TRUE);
+        }
+    }
+}
+
+int SelectPlaylistRowForAction(ResidentState& state, int row) {
     if (row < 0 ||
         static_cast<std::size_t>(row) >= state.playlistSources.size()) {
+        return -1;
+    }
+    if ((ListView_GetItemState(state.playlistList, row, LVIS_SELECTED) &
+            LVIS_SELECTED) == 0) {
+        ListView_SetItemState(
+            state.playlistList, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        ListView_SetItemState(
+            state.playlistList,
+            row,
+            LVIS_SELECTED | LVIS_FOCUSED,
+            LVIS_SELECTED | LVIS_FOCUSED);
+    } else {
+        ListView_SetItemState(state.playlistList, -1, 0, LVIS_FOCUSED);
+        ListView_SetItemState(
+            state.playlistList, row, LVIS_FOCUSED, LVIS_FOCUSED);
+    }
+    const auto selectedRows = SelectedPlaylistRows(state);
+    return selectedRows.empty() ? -1 : selectedRows.front();
+}
+
+void RefreshPlaylistAfterDeletion(ResidentState& state, HWND owner) {
+    try {
+        StartPlaylistRefresh(state);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"The Playlist could not be refreshed after deletion.", owner);
+    }
+}
+
+bool DeletePlaylistImagesFromDisk(
+    const std::vector<std::filesystem::path>& imagePaths,
+    HWND owner) {
+    if (imagePaths.empty()) {
+        return false;
+    }
+
+    std::wstring message = L"Are you sure you want to delete ";
+    message += imagePaths.size() == 1
+        ? L"this image?"
+        : std::to_wstring(imagePaths.size()) + L" selected images?";
+    message += L"\r\n\r\n";
+    constexpr std::size_t displayedNamesLimit = 8;
+    for (std::size_t index = 0;
+         index < imagePaths.size() && index < displayedNamesLimit;
+         ++index) {
+        message += imagePaths[index].filename().wstring() + L"\r\n";
+    }
+    if (imagePaths.size() > displayedNamesLimit) {
+        message += L"...and " +
+            std::to_wstring(imagePaths.size() - displayedNamesLimit) +
+            L" more.\r\n";
+    }
+    message +=
+        L"\r\nWindows will move them to the Recycle Bin when possible. "
+        L"If the Recycle Bin is unavailable, they may be permanently deleted.";
+    if (MessageBoxW(
+            owner,
+            message.c_str(),
+            L"Delete Playlist images",
+            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return false;
+    }
+
+    std::wstring pathList;
+    for (const auto& imagePath : imagePaths) {
+        pathList += imagePath.wstring();
+        pathList.push_back(L'\0');
+    }
+    pathList.push_back(L'\0');
+    SHFILEOPSTRUCTW operation{};
+    operation.hwnd = owner;
+    operation.wFunc = FO_DELETE;
+    operation.pFrom = pathList.c_str();
+    operation.fFlags =
+        FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI;
+    const int result = SHFileOperationW(&operation);
+    if (result != 0 || operation.fAnyOperationsAborted) {
+        const DWORD error = result != 0
+            ? static_cast<DWORD>(result)
+            : ERROR_CANCELLED;
+        ShowError(
+            L"Could not delete all selected Playlist images: " +
+                Win32Message(error),
+            owner);
+        return false;
+    }
+
+    return true;
+}
+
+void DeletePlaylistImages(
+    ResidentState& state,
+    const std::vector<std::filesystem::path>& imagePaths,
+    HWND owner) {
+    if (!DeletePlaylistImagesFromDisk(imagePaths, owner)) {
         return;
     }
+    RefreshPlaylistAfterDeletion(state, owner);
+}
+
+bool SaveEditedPlaylistFile(
+    ResidentState& state,
+    std::vector<std::wstring> entries,
+    std::wstring status,
+    std::vector<std::size_t> selectedRows,
+    HWND owner) {
+    try {
+        WritePlaylistFile(state.settings.playlistFilePath, entries);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+        return false;
+    } catch (const std::exception&) {
+        ShowError(L"Could not save the active playlist file.", owner);
+        return false;
+    }
+
+    state.playlistFileEntries = std::move(entries);
+    state.playlistFileDirty = false;
+    try {
+        StartPlaylistRefresh(state);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not refresh the Playlist after editing.", owner);
+    }
+    state.playlistPendingSelectionRows = std::move(selectedRows);
+    state.playlistPendingSelectionGeneration =
+        state.playlistGeneration + (state.playlistRefreshPending ? 1 : 0);
+    state.playlistOperationStatus = std::move(status);
+    SetPlaylistHint(state, state.playlistRunning);
+    SyncPlaylistEditControls(state);
+    return true;
+}
+
+void AddPlaylistPaths(
+    ResidentState& state,
+    const std::vector<std::filesystem::path>& selectedPaths,
+    HWND owner) {
+    std::vector<std::wstring> importedPaths;
+    for (const auto& selectedPath : selectedPaths) {
+        std::error_code error;
+        const bool directory = std::filesystem::is_directory(selectedPath, error);
+        if (error) {
+            Fail(L"Could not inspect the selected path \"" +
+                selectedPath.wstring() + L"\": " + FilesystemErrorText(error));
+        }
+        std::vector<std::filesystem::path> images;
+        if (directory) {
+            images = FindImages(selectedPath);
+        } else {
+            const bool regularFile =
+                std::filesystem::is_regular_file(selectedPath, error);
+            if (error) {
+                Fail(L"Could not inspect the selected image \"" +
+                    selectedPath.wstring() + L"\": " +
+                    FilesystemErrorText(error));
+            }
+            if (regularFile &&
+                swc::IsSupportedExtension(selectedPath.extension().wstring()) &&
+                !IsGeneratedWallpaperFile(selectedPath)) {
+                images.push_back(selectedPath);
+            }
+        }
+        for (const auto& image : images) {
+            const auto absolute = std::filesystem::absolute(image, error);
+            if (error) {
+                Fail(L"Could not resolve an imported image path: " +
+                    FilesystemErrorText(error));
+            }
+            importedPaths.push_back(absolute.lexically_normal().wstring());
+        }
+    }
+
+    if (importedPaths.empty()) {
+        state.playlistOperationStatus = L"Added 0 images to the playlist.";
+        SetPlaylistHint(state, state.playlistRunning);
+        return;
+    }
+    auto entries = state.playlistFileEntries;
+    const std::size_t firstAddedRow = entries.size();
+    entries.insert(
+        entries.end(), importedPaths.begin(), importedPaths.end());
+    std::vector<std::size_t> selectedRows;
+    selectedRows.reserve(importedPaths.size());
+    for (std::size_t index = 0; index < importedPaths.size(); ++index) {
+        selectedRows.push_back(firstAddedRow + index);
+    }
+    SaveEditedPlaylistFile(
+        state,
+        std::move(entries),
+        L"Added " + std::to_wstring(importedPaths.size()) +
+            L" image(s) to the playlist.",
+        std::move(selectedRows),
+        owner);
+}
+
+std::filesystem::path PlaylistImportInitialDirectory(
+    const ResidentState& state) {
+    std::filesystem::path directory(state.settings.lastPlaylistImportFolder);
+    if (directory.empty()) {
+        return ExecutableDirectory();
+    }
+    if (directory.is_relative()) {
+        directory = ExecutableDirectory() / directory;
+    }
+
+    std::error_code error;
+    const bool exists = std::filesystem::is_directory(directory, error);
+    if (error &&
+        error != std::errc::no_such_file_or_directory &&
+        error != std::errc::not_a_directory) {
+        Fail(L"Could not inspect the last Playlist import folder: " +
+            FilesystemErrorText(error));
+    }
+    if (!exists) {
+        return ExecutableDirectory();
+    }
+
+    const auto absoluteDirectory = std::filesystem::absolute(directory, error);
+    if (error) {
+        Fail(L"Could not resolve the last Playlist import folder: " +
+            FilesystemErrorText(error));
+    }
+    return absoluteDirectory.lexically_normal();
+}
+
+void RememberPlaylistImportFolder(
+    ResidentState& state,
+    const std::filesystem::path& directory) {
+    std::error_code error;
+    const auto absoluteDirectory = std::filesystem::absolute(directory, error);
+    if (error) {
+        Fail(L"Could not resolve the selected Playlist import folder: " +
+            FilesystemErrorText(error));
+    }
+    if (!std::filesystem::is_directory(absoluteDirectory, error)) {
+        Fail(L"Could not verify the selected Playlist import folder: " +
+            (error
+                ? FilesystemErrorText(error)
+                : L"The selected path is not a folder."));
+    }
+
+    const std::wstring normalizedDirectory =
+        absoluteDirectory.lexically_normal().wstring();
+    UpdateLastPlaylistImportFolder(
+        state.settingsPath, normalizedDirectory);
+    state.settings.lastPlaylistImportFolder = normalizedDirectory;
+}
+
+void AddPlaylistFilesFromPicker(ResidentState& state, HWND owner) {
+    const auto initialDirectory = PlaylistImportInitialDirectory(state);
+    const auto selectedPaths =
+        SelectPlaylistImportPaths(owner, initialDirectory);
+    if (!selectedPaths.empty()) {
+        RememberPlaylistImportFolder(state, selectedPaths.front().parent_path());
+        AddPlaylistPaths(state, selectedPaths, owner);
+    }
+}
+
+void AddPlaylistFolder(ResidentState& state, HWND owner) {
+    const auto initialDirectory = PlaylistImportInitialDirectory(state);
+    const auto selectedDirectory = SelectSourceDirectory(
+        owner, initialDirectory.wstring());
+    if (!selectedDirectory.empty()) {
+        RememberPlaylistImportFolder(
+            state, std::filesystem::path(selectedDirectory));
+        AddPlaylistPaths(
+            state,
+            {std::filesystem::path(selectedDirectory)},
+            owner);
+    }
+}
+
+std::vector<std::filesystem::path> SelectedPlaylistImagePaths(
+    const ResidentState& state,
+    const std::vector<int>& rows) {
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(rows.size());
+    for (const int row : rows) {
+        paths.push_back(
+            state.playlistSources[static_cast<std::size_t>(row)].path);
+    }
+    return paths;
+}
+
+void RemoveSelectedPlaylistEntries(ResidentState& state, HWND owner) {
+    const auto selectedRows = SelectedPlaylistRows(state);
+    if (selectedRows.empty()) {
+        return;
+    }
+    std::vector<bool> removeRows(state.playlistFileEntries.size(), false);
+    for (const int row : selectedRows) {
+        if (static_cast<std::size_t>(row) < removeRows.size()) {
+            removeRows[static_cast<std::size_t>(row)] = true;
+        }
+    }
+    std::vector<std::wstring> entries;
+    entries.reserve(state.playlistFileEntries.size() - selectedRows.size());
+    for (std::size_t row = 0; row < state.playlistFileEntries.size(); ++row) {
+        if (!removeRows[row]) {
+            entries.push_back(state.playlistFileEntries[row]);
+        }
+    }
+    SaveEditedPlaylistFile(
+        state,
+        std::move(entries),
+        L"Removed " + std::to_wstring(selectedRows.size()) +
+            L" image(s) from the playlist.",
+        {},
+        owner);
+}
+
+void DeleteSelectedPlaylistFileEntries(ResidentState& state, HWND owner) {
+    const auto selectedRows = SelectedPlaylistRows(state);
+    if (selectedRows.empty()) {
+        return;
+    }
+    auto selectedPaths = SelectedPlaylistImagePaths(state, selectedRows);
+    std::vector<std::wstring> selectedPathStrings;
+    selectedPathStrings.reserve(selectedPaths.size());
+    for (const auto& path : selectedPaths) {
+        selectedPathStrings.push_back(path.wstring());
+    }
+    const auto uniquePaths =
+        swc::RemoveDuplicatePlaylistImagePaths(selectedPathStrings);
+    std::vector<std::filesystem::path> pathsToDelete;
+    pathsToDelete.reserve(uniquePaths.imagePaths.size());
+    for (const auto& path : uniquePaths.imagePaths) {
+        pathsToDelete.emplace_back(path);
+    }
+    if (!DeletePlaylistImagesFromDisk(pathsToDelete, owner)) {
+        return;
+    }
+
+    std::unordered_set<std::wstring> deletedPathKeys;
+    for (const auto& path : pathsToDelete) {
+        deletedPathKeys.insert(swc::PlaylistImagePathKey(path.wstring()));
+    }
+    std::vector<std::wstring> entries;
+    entries.reserve(state.playlistFileEntries.size());
+    for (const auto& entry : state.playlistFileEntries) {
+        if (deletedPathKeys.find(swc::PlaylistImagePathKey(entry)) ==
+            deletedPathKeys.end()) {
+            entries.push_back(entry);
+        }
+    }
+    SaveEditedPlaylistFile(
+        state,
+        std::move(entries),
+        L"Deleted " + std::to_wstring(pathsToDelete.size()) +
+            L" image(s) and removed them from the playlist.",
+        {},
+        owner);
+}
+
+void RemoveDuplicatePlaylistEntries(ResidentState& state, HWND owner) {
+    const auto result =
+        swc::RemoveDuplicatePlaylistImagePaths(state.playlistFileEntries);
+    if (result.removedCount == 0) {
+        state.playlistOperationStatus = L"No duplicate image paths were found.";
+        SetPlaylistHint(state, state.playlistRunning);
+        return;
+    }
+    SaveEditedPlaylistFile(
+        state,
+        result.imagePaths,
+        L"Found " + std::to_wstring(result.duplicatePathCount) +
+            L" path(s) with duplicates; removed " +
+            std::to_wstring(result.removedCount) + L" duplicate(s).",
+        {},
+        owner);
+}
+
+void ShowPlaylistContextMenu(ResidentState& state, int row) {
+    const int firstSelectedRow = SelectPlaylistRowForAction(state, row);
+    if (firstSelectedRow < 0) {
+        return;
+    }
+    const auto selectedRows = SelectedPlaylistRows(state);
+    const auto selectedImagePaths =
+        SelectedPlaylistImagePaths(state, selectedRows);
+    const bool playlistFileMode =
+        state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile;
 
     HMENU menu = CreatePopupMenu();
     if (!menu) {
@@ -3836,7 +6748,9 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
         return;
     }
     bool populated = true;
-    for (std::size_t index = 0; index < state.playlistDisplays.size(); ++index) {
+    for (std::size_t index = 0;
+         index < state.playlistDisplays.size();
+         ++index) {
         const std::wstring label =
             L"Set as background on " + state.playlistDisplays[index].friendlyName;
         if (!AppendMenuW(
@@ -3848,19 +6762,39 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
             break;
         }
     }
-    if (!populated || state.playlistDisplays.empty()) {
+    if (populated) {
+        if (!state.playlistDisplays.empty() || playlistFileMode) {
+            populated = AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        }
+        if (populated && playlistFileMode) {
+            populated =
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    kRemovePlaylistEntriesCommandId,
+                    L"Remove") &&
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    kDeletePlaylistEntriesCommandId,
+                    L"Delete");
+        } else if (populated) {
+            populated = AppendMenuW(
+                menu,
+                MF_STRING,
+                kDeletePlaylistImageCommandId,
+                L"Delete");
+        }
+    }
+    if (!populated) {
         const DWORD error = GetLastError();
         DestroyMenu(menu);
         ShowError(
-            state.playlistDisplays.empty()
-                ? L"No connected displays are available."
-                : L"Could not populate the Playlist menu: " + Win32Message(error),
+            L"Could not populate the Playlist menu: " + Win32Message(error),
             state.settingsWindow);
         return;
     }
 
-    ListView_SetItemState(
-        state.playlistList, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     POINT cursor{};
     if (!GetCursorPos(&cursor)) {
         const DWORD error = GetLastError();
@@ -3880,6 +6814,18 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
         nullptr);
     DestroyMenu(menu);
     PostMessageW(state.settingsWindow, WM_NULL, 0, 0);
+    if (command == kDeletePlaylistImageCommandId) {
+        DeletePlaylistImages(state, selectedImagePaths, state.settingsWindow);
+        return;
+    }
+    if (command == kRemovePlaylistEntriesCommandId) {
+        RemoveSelectedPlaylistEntries(state, state.settingsWindow);
+        return;
+    }
+    if (command == kDeletePlaylistEntriesCommandId) {
+        DeleteSelectedPlaylistFileEntries(state, state.settingsWindow);
+        return;
+    }
     if (command >= kSetDisplayCommandBase) {
         const std::size_t displayIndex = command - kSetDisplayCommandBase;
         if (displayIndex < state.playlistDisplays.size()) {
@@ -3887,7 +6833,8 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
                 state,
                 WallpaperRequest{
                     false,
-                    SourceImageIdentity(state.playlistSources[static_cast<std::size_t>(row)]),
+                    SourceImageIdentity(state.playlistSources[
+                        static_cast<std::size_t>(firstSelectedRow)]),
                     state.playlistDisplays[displayIndex].devicePath});
         }
     }
@@ -3906,7 +6853,53 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         state->settingsWindow = window;
         try {
             state->settingsFont = CreateSettingsFont();
-            state->monitorPreviewPanel = CreateWindowExW(
+        LOGFONTW countdownFontDescription{};
+        countdownFontDescription.lfHeight = -34;
+        countdownFontDescription.lfWeight = FW_BOLD;
+        lstrcpynW(
+            countdownFontDescription.lfFaceName,
+            L"Segoe UI",
+            LF_FACESIZE);
+        state->countdownFont = CreateFontIndirectW(&countdownFontDescription);
+        if (!state->countdownFont) {
+            FailWin32(L"Could not create the countdown display font");
+        }
+        state->countdownDisplay = CreateSettingsControl(
+            0, L"STATIC", L"00:10:00",
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+            12, 40, 220, 42, window, kCountdownDisplayId,
+            state->instance, state->settingsFont);
+        SendMessageW(
+            state->countdownDisplay,
+            WM_SETFONT,
+            reinterpret_cast<WPARAM>(state->countdownFont),
+            TRUE);
+        state->countdownPreviousButton = CreateSettingsControl(
+            0, L"BUTTON", L"Previous image",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            39, 86, 30, 30, window, kCountdownPreviousButtonId,
+            state->instance, state->settingsFont);
+        state->countdownStartStopButton = CreateSettingsControl(
+            0, L"BUTTON", L"Start countdown",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            73, 86, 30, 30, window, kCountdownStartStopButtonId,
+            state->instance, state->settingsFont);
+        state->countdownPauseResumeButton = CreateSettingsControl(
+            0, L"BUTTON", L"Pause countdown",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            107, 86, 30, 30, window, kCountdownPauseResumeButtonId,
+            state->instance, state->settingsFont);
+        state->countdownRestartButton = CreateSettingsControl(
+            0, L"BUTTON", L"Restart countdown",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            141, 86, 30, 30, window, kCountdownRestartButtonId,
+            state->instance, state->settingsFont);
+        state->countdownNextButton = CreateSettingsControl(
+            0, L"BUTTON", L"Next image",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            175, 86, 30, 30, window, kCountdownNextButtonId,
+            state->instance, state->settingsFont);
+        state->monitorPreviewPanel = CreateWindowExW(
                 0,
                 kMonitorPreviewPanelClass,
                 L"",
@@ -3937,6 +6930,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             wchar_t playlistTabText[] = L"Playlist";
             wchar_t backgroundTabText[] = L"Background";
             wchar_t imageTabText[] = L"Image";
+            wchar_t countdownTabText[] = L"Countdown";
             TCITEMW tab{};
             tab.mask = TCIF_TEXT;
             tab.pszText = startupTabText;
@@ -3959,6 +6953,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             if (TabCtrl_InsertItem(state->settingsTabs, 4, &tab) == -1) {
                 Fail(L"Could not add the Image settings tab.");
             }
+            tab.pszText = countdownTabText;
+            if (TabCtrl_InsertItem(state->settingsTabs, 5, &tab) == -1) {
+                Fail(L"Could not add the Countdown settings tab.");
+            }
             TabCtrl_SetCurSel(state->settingsTabs, 0);
 
             state->changeOnStartCheckbox = CreateSettingsControl(
@@ -3980,6 +6978,16 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 state->openWindowOnStartCheckbox,
                 BM_SETCHECK,
                 state->settings.openWindowOnStart ? BST_CHECKED : BST_UNCHECKED,
+                0);
+            state->startWithWindowsCheckbox = CreateSettingsControl(
+                0, L"BUTTON", L"Start with Windows",
+                WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+                30, 251, 900, 28, window, kStartWithWindowsCheckboxId,
+                state->instance, state->settingsFont);
+            SendMessageW(
+                state->startWithWindowsCheckbox,
+                BM_SETCHECK,
+                state->settings.startWithWindows ? BST_CHECKED : BST_UNCHECKED,
                 0);
 
             state->backgroundFillModeLabel = CreateSettingsControl(
@@ -4022,20 +7030,40 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             EnableWindow(state->backgroundFillColorLabel, fillColorMode);
             EnableWindow(state->backgroundFillColorButton, fillColorMode);
 
+            state->multiMonitorSettingsGroup = CreateSettingsControl(
+                0, L"BUTTON", L"Multi-monitor settings",
+                WS_CHILD | BS_GROUPBOX,
+                20, 180, kSettingsContentWidth - 40, 82, window,
+                kMultiMonitorSettingsGroupId, state->instance, state->settingsFont);
+            state->imagePlacementGroup = CreateSettingsControl(
+                0, L"BUTTON", L"Image placement",
+                WS_CHILD | BS_GROUPBOX,
+                20, 268, kSettingsContentWidth - 40, 306, window,
+                kImagePlacementGroupId, state->instance, state->settingsFont);
+            state->sameImageOnDisplaysRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Use the same image on all displays",
+                WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                40, 204, 340, 28, window, kSameImageOnDisplaysRadioId,
+                state->instance, state->settingsFont);
+            state->separateImagesOnDisplaysRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Use separate images on all displays",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                390, 204, 548, 28, window, kSeparateImagesOnDisplaysRadioId,
+                state->instance, state->settingsFont);
             state->imageResizeToRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Resize to...",
                 WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-                30, 190, 450, 28, window, kImageResizeToRadioId,
+                40, 288, 450, 28, window, kImageResizeToRadioId,
                 state->instance, state->settingsFont);
             state->imageResizeToPercentLabel = CreateSettingsControl(
                 0, L"STATIC", L"Target on closer dimension:",
                 WS_CHILD | SS_LEFT,
-                58, 226, 168, 26, window, kImageResizeToPercentLabelId,
+                68, 321, 168, 26, window, kImageResizeToPercentLabelId,
                 state->instance, state->settingsFont);
             state->imageResizeToPercentEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
-                230, 221, 64, 27, window, kImageResizeToPercentEditId,
+                240, 316, 64, 27, window, kImageResizeToPercentEditId,
                 state->instance, state->settingsFont);
             SendMessageW(state->imageResizeToPercentEdit, EM_LIMITTEXT, 4, 0);
             SetWindowTextW(
@@ -4044,47 +7072,47 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->imageResizeToPercentUnitLabel = CreateSettingsControl(
                 0, L"STATIC", L"%",
                 WS_CHILD | SS_LEFT,
-                300, 226, 24, 26, window, kImageResizeToPercentUnitLabelId,
+                310, 321, 24, 26, window, kImageResizeToPercentUnitLabelId,
                 state->instance, state->settingsFont);
             state->imageAutoFitRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Autofit...",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                30, 263, 450, 28, window, kImageAutoFitRadioId,
+                40, 349, 450, 28, window, kImageAutoFitRadioId,
                 state->instance, state->settingsFont);
             state->imageSmallGroup = CreateSettingsControl(
                 0, L"BUTTON", L"If the image is too small",
                 WS_CHILD | BS_GROUPBOX,
-                30, 300, 444, 220, window, kImageSmallGroupId,
+                30, 380, 444, 176, window, kImageSmallGroupId,
                 state->instance, state->settingsFont);
             state->imageLargeGroup = CreateSettingsControl(
                 0, L"BUTTON", L"If the image is too large",
                 WS_CHILD | BS_GROUPBOX,
-                490, 300, 444, 220, window, kImageLargeGroupId,
+                490, 380, 444, 176, window, kImageLargeGroupId,
                 state->instance, state->settingsFont);
             state->imageSmallCenteredRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Centered - display without enlarging",
                 WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-                50, 326, 390, 28, window, kImageSmallCenteredRadioId,
+                50, 403, 390, 28, window, kImageSmallCenteredRadioId,
                 state->instance, state->settingsFont);
             state->imageSmallTileRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Tile",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                50, 360, 390, 28, window, kImageSmallTileRadioId,
+                50, 433, 390, 28, window, kImageSmallTileRadioId,
                 state->instance, state->settingsFont);
             state->imageSmallFitRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Fit - enlarge to touch the frame",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                50, 394, 390, 28, window, kImageSmallFitRadioId,
+                50, 463, 390, 28, window, kImageSmallFitRadioId,
                 state->instance, state->settingsFont);
             state->imageMaxEnlargeLabel = CreateSettingsControl(
                 0, L"STATIC", L"Maximum enlargement:",
                 WS_CHILD | SS_LEFT,
-                72, 432, 170, 26, window, kImageMaxEnlargeLabelId,
+                72, 497, 170, 26, window, kImageMaxEnlargeLabelId,
                 state->instance, state->settingsFont);
             state->imageMaxEnlargePercentEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
-                247, 427, 64, 27, window, kImageMaxEnlargePercentEditId,
+                247, 492, 64, 27, window, kImageMaxEnlargePercentEditId,
                 state->instance, state->settingsFont);
             SendMessageW(state->imageMaxEnlargePercentEdit, EM_LIMITTEXT, 4, 0);
             SetWindowTextW(
@@ -4094,29 +7122,89 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->imageMaxEnlargePercentLabel = CreateSettingsControl(
                 0, L"STATIC", L"%",
                 WS_CHILD | SS_LEFT,
-                315, 432, 32, 26, window, kImageMaxEnlargePercentLabelId,
+                315, 497, 32, 26, window, kImageMaxEnlargePercentLabelId,
                 state->instance, state->settingsFont);
             state->imageLargeCenteredRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Centered - crop equally from each side",
                 WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
-                510, 326, 390, 28, window, kImageLargeCenteredRadioId,
+                510, 403, 390, 28, window, kImageLargeCenteredRadioId,
                 state->instance, state->settingsFont);
             state->imageLargeFillRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Fill - crop the longer dimension",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                510, 360, 390, 28, window, kImageLargeFillRadioId,
+                510, 433, 390, 28, window, kImageLargeFillRadioId,
                 state->instance, state->settingsFont);
             state->imageLargeFitRadio = CreateSettingsControl(
                 0, L"BUTTON", L"Fit - show the entire image",
                 WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
-                510, 394, 390, 28, window, kImageLargeFitRadioId,
+                510, 463, 390, 28, window, kImageLargeFitRadioId,
                 state->instance, state->settingsFont);
             SyncImageSizingControls(*state);
 
+            state->countdownEnabledCheckbox = CreateSettingsControl(
+                0, L"BUTTON", L"Enabled",
+                WS_CHILD | WS_TABSTOP | BS_AUTOCHECKBOX,
+                30, 190, 900, 28, window, kCountdownEnabledCheckboxId,
+                state->instance, state->settingsFont);
+            state->countdownDurationGroup = CreateSettingsControl(
+                0, L"BUTTON", L"Countdown time",
+                WS_CHILD | BS_GROUPBOX,
+                20, 232, kSettingsContentWidth - 40, 104, window,
+                kCountdownDurationGroupId, state->instance, state->settingsFont);
+            state->countdownHoursLabel = CreateSettingsControl(
+                0, L"STATIC", L"Hours (0-99)",
+                WS_CHILD | SS_LEFT,
+                50, 260, 120, 24, window, kCountdownHoursLabelId,
+                state->instance, state->settingsFont);
+            state->countdownHoursEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                50, 286, 120, 30, window, kCountdownHoursEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->countdownHoursEdit, EM_LIMITTEXT, 2, 0);
+            state->countdownMinutesLabel = CreateSettingsControl(
+                0, L"STATIC", L"Minutes (0-59)",
+                WS_CHILD | SS_LEFT,
+                250, 260, 120, 24, window, kCountdownMinutesLabelId,
+                state->instance, state->settingsFont);
+            state->countdownMinutesEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                250, 286, 120, 30, window, kCountdownMinutesEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->countdownMinutesEdit, EM_LIMITTEXT, 2, 0);
+            state->countdownSecondsLabel = CreateSettingsControl(
+                0, L"STATIC", L"Seconds (0-59)",
+                WS_CHILD | SS_LEFT,
+                450, 260, 120, 24, window, kCountdownSecondsLabelId,
+                state->instance, state->settingsFont);
+            state->countdownSecondsEdit = CreateSettingsControl(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
+                450, 286, 120, 30, window, kCountdownSecondsEditId,
+                state->instance, state->settingsFont);
+            SendMessageW(state->countdownSecondsEdit, EM_LIMITTEXT, 2, 0);
+            SyncCountdownControls(*state);
+
+            state->sourceFoldersModeRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Source folders",
+                WS_CHILD | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+                28, 174, 180, 28, window, kSourceFoldersModeRadioId,
+                state->instance, state->settingsFont);
+            state->playlistFileModeRadio = CreateSettingsControl(
+                0, L"BUTTON", L"Playlist File",
+                WS_CHILD | WS_TABSTOP | BS_AUTORADIOBUTTON,
+                220, 174, 180, 28, window, kPlaylistFileModeRadioId,
+                state->instance, state->settingsFont);
+            state->sourceListGroup = CreateSettingsControl(
+                0, L"BUTTON", L"Source folders",
+                WS_CHILD | BS_GROUPBOX,
+                20, 207, kSettingsContentWidth - 40, 321, window,
+                kSourceListGroupId, state->instance, state->settingsFont);
             state->sourceDirectoryList = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
                 WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                28, 186, kSettingsContentWidth, 390, window, kSourceDirectoryListId,
+                30, 235, kSettingsContentWidth - 60, 241, window, kSourceDirectoryListId,
                 state->instance,
                 state->settingsFont);
             if (!SetWindowSubclass(
@@ -4138,25 +7226,40 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             }
             CreateSettingsControl(
                 0, L"BUTTON", L"Add folder...",
-                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 28, 590, 130, 32, window, kAddSourceDirectoryButtonId, state->instance,
                 state->settingsFont);
             CreateSettingsControl(
                 0, L"BUTTON", L"Remove",
-                WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
                 172, 590, 110, 32, window, kRemoveSourceDirectoryButtonId, state->instance,
                 state->settingsFont);
             state->sourceDirectoryHint = CreateSettingsControl(
                 0, L"STATIC",
                 L"Drop folders here to add them. Uncheck all folders to use the working folder.",
                 WS_CHILD | SS_LEFT,
-                28, 632, kSettingsContentWidth, 36, window, kSourceDirectoryHintId,
+                32, 484, kSettingsContentWidth - 64, 32, window, kSourceDirectoryHintId,
                 state->instance,
                 state->settingsFont);
+            state->newPlaylistFileButton = CreateSettingsControl(
+                0, L"BUTTON", L"New",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                28, 294, 180, 38, window, kNewPlaylistFileButtonId,
+                state->instance, state->settingsFont);
+            state->openPlaylistFileButton = CreateSettingsControl(
+                0, L"BUTTON", L"Open...",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                220, 294, 180, 38, window, kOpenPlaylistFileButtonId,
+                state->instance, state->settingsFont);
+            state->saveAsPlaylistFileButton = CreateSettingsControl(
+                0, L"BUTTON", L"Save As...",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                412, 294, 180, 38, window, kSaveAsPlaylistFileButtonId,
+                state->instance, state->settingsFont);
 
             state->playlistList = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SHOWSELALWAYS,
                 28, 186, kSettingsContentWidth, 468, window, kPlaylistListId,
                 state->instance,
                 state->settingsFont);
@@ -4197,6 +7300,31 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 28, 662, kSettingsContentWidth, 28, window, kPlaylistHintId,
                 state->instance,
                 state->settingsFont);
+            state->playlistAddFilesButton = CreateSettingsControl(
+                0, L"BUTTON", L"Add file(s)",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                28, 700, 150, 32, window, kPlaylistAddFilesButtonId,
+                state->instance, state->settingsFont);
+            state->playlistAddFolderButton = CreateSettingsControl(
+                0, L"BUTTON", L"Add folder",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                186, 700, 150, 32, window, kPlaylistAddFolderButtonId,
+                state->instance, state->settingsFont);
+            state->playlistRemoveButton = CreateSettingsControl(
+                0, L"BUTTON", L"Remove",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                344, 700, 120, 32, window, kPlaylistRemoveButtonId,
+                state->instance, state->settingsFont);
+            state->playlistDeleteButton = CreateSettingsControl(
+                0, L"BUTTON", L"Delete",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                472, 700, 120, 32, window, kPlaylistDeleteButtonId,
+                state->instance, state->settingsFont);
+            state->playlistRemoveDuplicatesButton = CreateSettingsControl(
+                0, L"BUTTON", L"Remove Duplicates",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                600, 700, 190, 32, window, kPlaylistRemoveDuplicatesButtonId,
+                state->instance, state->settingsFont);
             CreateSettingsControl(
                 0, L"BUTTON", L"Close",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
@@ -4260,6 +7388,31 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         }
         return 0;
     case WM_DRAWITEM:
+        if (state && (
+                static_cast<int>(wParam) == kCountdownPreviousButtonId ||
+                static_cast<int>(wParam) == kCountdownStartStopButtonId ||
+                static_cast<int>(wParam) == kCountdownPauseResumeButtonId ||
+                static_cast<int>(wParam) == kCountdownRestartButtonId ||
+                static_cast<int>(wParam) == kCountdownNextButtonId)) {
+            DrawCountdownButton(
+                *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam), *state);
+            return TRUE;
+        }
+        if (state && (
+                static_cast<int>(wParam) == kAddSourceDirectoryButtonId ||
+                static_cast<int>(wParam) == kNewPlaylistFileButtonId ||
+                static_cast<int>(wParam) == kOpenPlaylistFileButtonId ||
+                static_cast<int>(wParam) == kSaveAsPlaylistFileButtonId ||
+                static_cast<int>(wParam) == kRemoveSourceDirectoryButtonId ||
+                static_cast<int>(wParam) == kPlaylistAddFilesButtonId ||
+                static_cast<int>(wParam) == kPlaylistAddFolderButtonId ||
+                static_cast<int>(wParam) == kPlaylistRemoveButtonId ||
+                static_cast<int>(wParam) == kPlaylistDeleteButtonId ||
+                static_cast<int>(wParam) == kPlaylistRemoveDuplicatesButtonId)) {
+            DrawPlaylistFileButton(
+                *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        }
         if (state && static_cast<int>(wParam) == kBackgroundFillColorButtonId) {
             const auto* draw = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
             const COLORREF color = RGB(
@@ -4348,7 +7501,11 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                         (change->uOldState & LVIS_STATEIMAGEMASK) >> 12;
                     const UINT newImage =
                         (change->uNewState & LVIS_STATEIMAGEMASK) >> 12;
-                    if ((change->uChanged & LVIF_STATE) != 0 &&
+                    const bool folderMode =
+                        state->settings.imageSourceMode ==
+                        swc::ImageSourceMode::sourceFolders;
+                    if (folderMode &&
+                        (change->uChanged & LVIF_STATE) != 0 &&
                         oldImage != newImage &&
                         change->iItem >= 0 &&
                         static_cast<std::size_t>(change->iItem) <
@@ -4357,14 +7514,50 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                         directories[static_cast<std::size_t>(change->iItem)].enabled =
                             ListView_GetCheckState(state->sourceDirectoryList, change->iItem) != FALSE;
                         SaveSourceDirectoryListWithError(*state, std::move(directories), window);
+                    } else if (!folderMode &&
+                        (change->uChanged & LVIF_STATE) != 0 &&
+                        oldImage != newImage &&
+                        change->iItem >= 0 &&
+                        static_cast<std::size_t>(change->iItem) <
+                            state->settings.recentPlaylistFiles.size()) {
+                        if (ListView_GetCheckState(
+                                state->sourceDirectoryList, change->iItem)) {
+                            ActivateRecentPlaylistRow(
+                                *state, change->iItem, window);
+                        } else {
+                            RefreshSourceDirectoryList(*state);
+                        }
+                    } else if (!folderMode &&
+                        (change->uChanged & LVIF_STATE) != 0 &&
+                        (change->uNewState & LVIS_SELECTED) != 0 &&
+                        (change->uOldState & LVIS_SELECTED) == 0 &&
+                        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) == 0 &&
+                        change->iItem >= 0 &&
+                        static_cast<std::size_t>(change->iItem) <
+                            state->settings.recentPlaylistFiles.size()) {
+                        ActivateRecentPlaylistRow(
+                            *state, change->iItem, window);
                     }
+                    return 0;
+                }
+                if (notification->code == NM_CLICK &&
+                    state->settings.imageSourceMode ==
+                        swc::ImageSourceMode::playlistFile) {
+                    const auto* click =
+                        reinterpret_cast<const NMITEMACTIVATE*>(lParam);
+                    ActivateRecentPlaylistRow(*state, click->iItem, window);
                     return 0;
                 }
                 if (notification->code == LVN_BEGINDRAG) {
                     const auto* drag = reinterpret_cast<const NMLISTVIEW*>(lParam);
+                    const bool folderMode =
+                        state->settings.imageSourceMode ==
+                        swc::ImageSourceMode::sourceFolders;
+                    const std::size_t itemCount = folderMode
+                        ? state->settings.sourceDirectories.size()
+                        : state->settings.recentPlaylistFiles.size();
                     if (drag->iItem < 0 ||
-                        static_cast<std::size_t>(drag->iItem) >=
-                            state->settings.sourceDirectories.size()) {
+                        static_cast<std::size_t>(drag->iItem) >= itemCount) {
                         return 0;
                     }
                     state->draggingSourceIndex = drag->iItem;
@@ -4375,7 +7568,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                     } catch (const Failure& failure) {
                         ShowError(failure.message, window);
                     } catch (const std::exception&) {
-                        ShowError(L"Could not show the source-folder drag preview.", window);
+                        ShowError(L"Could not show the source-list drag preview.", window);
                     }
                     SetCapture(window);
                     SetCursor(LoadCursorW(nullptr, IDC_NO));
@@ -4404,14 +7597,19 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 }
             }
             if (notification->hwndFrom == state->playlistList) {
+                if (notification->code == LVN_ITEMCHANGED) {
+                    SyncPlaylistEditControls(*state);
+                    return 0;
+                }
                 if (notification->code == LVN_BEGINDRAG) {
                     const auto* drag = reinterpret_cast<const NMLISTVIEW*>(lParam);
-                    if (drag->iItem >= 0 &&
-                        static_cast<std::size_t>(drag->iItem) <
-                            state->playlistSources.size()) {
+                    const int firstSelectedRow =
+                        SelectPlaylistRowForAction(*state, drag->iItem);
+                    if (firstSelectedRow >= 0) {
                         state->draggingPlaylistImage = SourceImageIdentity(
-                            state->playlistSources[static_cast<std::size_t>(drag->iItem)]);
-                        state->draggingPlaylistRow = drag->iItem;
+                            state->playlistSources[
+                                static_cast<std::size_t>(firstSelectedRow)]);
+                        state->draggingPlaylistRow = firstSelectedRow;
                         state->monitorDropTarget = -1;
                         InvalidateRect(state->playlistList, nullptr, TRUE);
                         try {
@@ -4430,16 +7628,16 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 if (notification->code == NM_DBLCLK) {
                     const auto* activation =
                         reinterpret_cast<const NMITEMACTIVATE*>(lParam);
-                    if (activation->iItem >= 0 &&
-                        static_cast<std::size_t>(activation->iItem) <
-                            state->playlistSources.size()) {
+                    const int firstSelectedRow =
+                        SelectPlaylistRowForAction(*state, activation->iItem);
+                    if (firstSelectedRow >= 0) {
                         StartWallpaperChange(
                             *state,
                             WallpaperRequest{
                                 false,
                                 SourceImageIdentity(
                                     state->playlistSources[
-                                        static_cast<std::size_t>(activation->iItem)]),
+                                        static_cast<std::size_t>(firstSelectedRow)]),
                                 {}});
                     }
                     return 0;
@@ -4477,8 +7675,63 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
         }
         switch (LOWORD(wParam)) {
+        case kCountdownEnabledCheckboxId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                const bool enabled =
+                    SendMessageW(
+                        state->countdownEnabledCheckbox,
+                        BM_GETCHECK,
+                        0,
+                        0) == BST_CHECKED;
+                StartOrStopCountdown(*state, enabled, window);
+                return 0;
+            }
+            break;
+        case kCountdownHoursEditId:
+        case kCountdownMinutesEditId:
+        case kCountdownSecondsEditId:
+            if (HIWORD(wParam) == EN_KILLFOCUS) {
+                SaveCountdownDuration(*state, window);
+                return 0;
+            }
+            break;
+        case kCountdownPreviousButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RequestNextOrPrevious(*state, true);
+                return 0;
+            }
+            break;
+        case kCountdownNextButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RequestNextOrPrevious(*state, false);
+                return 0;
+            }
+            break;
+        case kCountdownStartStopButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                StartOrStopCountdown(
+                    *state, !state->settings.countdownEnabled, window);
+                return 0;
+            }
+            break;
+        case kCountdownPauseResumeButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                ToggleCountdownPause(*state);
+                return 0;
+            }
+            break;
+        case kCountdownRestartButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                if (state->settings.countdownEnabled) {
+                    ResetCountdown(*state);
+                }
+                return 0;
+            }
+            break;
         case kImageResizeToRadioId:
         case kImageAutoFitRadioId:
+        case kSameImageOnDisplaysRadioId:
+        case kSeparateImagesOnDisplaysRadioId:
         case kImageSmallCenteredRadioId:
         case kImageSmallTileRadioId:
         case kImageSmallFitRadioId:
@@ -4488,6 +7741,14 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             if (HIWORD(wParam) == BN_CLICKED) {
                 auto updated = state->settings;
                 switch (LOWORD(wParam)) {
+                case kSameImageOnDisplaysRadioId:
+                    updated.multiMonitorImageMode =
+                        swc::MultiMonitorImageMode::sameImage;
+                    break;
+                case kSeparateImagesOnDisplaysRadioId:
+                    updated.multiMonitorImageMode =
+                        swc::MultiMonitorImageMode::separateImages;
+                    break;
                 case kImageResizeToRadioId:
                     updated.imageSizingMode = swc::ImageSizingMode::resizeTo;
                     break;
@@ -4549,46 +7810,158 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
         case kChangeOnStartCheckboxId:
         case kOpenWindowOnStartCheckboxId:
+        case kStartWithWindowsCheckboxId:
             if (HIWORD(wParam) == BN_CLICKED) {
                 const bool openWindowSetting =
                     LOWORD(wParam) == kOpenWindowOnStartCheckboxId;
-                const HWND checkbox = openWindowSetting
+                const bool startWithWindowsSetting =
+                    LOWORD(wParam) == kStartWithWindowsCheckboxId;
+                const HWND checkbox = startWithWindowsSetting
+                    ? state->startWithWindowsCheckbox
+                    : openWindowSetting
                     ? state->openWindowOnStartCheckbox
                     : state->changeOnStartCheckbox;
                 auto updated = state->settings;
                 const bool checked =
                     SendMessageW(checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                if (openWindowSetting) {
+                if (startWithWindowsSetting) {
+                    updated.startWithWindows = checked;
+                } else if (openWindowSetting) {
                     updated.openWindowOnStart = checked;
                 } else {
                     updated.changeOnStart = checked;
                 }
+                bool registryChanged = false;
                 try {
+                    if (startWithWindowsSetting) {
+                        SetStartWithWindows(checked);
+                        registryChanged = true;
+                    }
                     UpdateUserSettings(state->settingsPath, updated);
                     state->settings = std::move(updated);
                 } catch (const Failure& failure) {
+                    std::wstring error = failure.message;
+                    if (registryChanged) {
+                        try {
+                            SetStartWithWindows(state->settings.startWithWindows);
+                        } catch (const Failure& rollbackFailure) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry: " + rollbackFailure.message;
+                        } catch (const std::exception&) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry due to an unexpected error.";
+                        }
+                    }
                     SendMessageW(
                         checkbox,
                         BM_SETCHECK,
-                        (openWindowSetting
+                        (startWithWindowsSetting
+                            ? state->settings.startWithWindows
+                            : openWindowSetting
                             ? state->settings.openWindowOnStart
                             : state->settings.changeOnStart)
                             ? BST_CHECKED
                             : BST_UNCHECKED,
                         0);
+                    ShowError(error, window);
+                } catch (const std::exception&) {
+                    std::wstring error = L"Could not save the Startup setting.";
+                    if (registryChanged) {
+                        try {
+                            SetStartWithWindows(state->settings.startWithWindows);
+                        } catch (const Failure& rollbackFailure) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry: " + rollbackFailure.message;
+                        } catch (const std::exception&) {
+                            error += L"\r\n\r\nCould not restore the previous Windows startup "
+                                L"entry due to an unexpected error.";
+                        }
+                    }
+                    SendMessageW(
+                        checkbox,
+                        BM_SETCHECK,
+                        (startWithWindowsSetting
+                            ? state->settings.startWithWindows
+                            : openWindowSetting
+                            ? state->settings.openWindowOnStart
+                            : state->settings.changeOnStart)
+                            ? BST_CHECKED
+                            : BST_UNCHECKED,
+                        0);
+                    ShowError(error, window);
+                }
+                return 0;
+            }
+            break;
+        case kSourceFoldersModeRadioId:
+        case kPlaylistFileModeRadioId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                SaveImageSourceMode(
+                    *state,
+                    LOWORD(wParam) == kPlaylistFileModeRadioId
+                        ? swc::ImageSourceMode::playlistFile
+                        : swc::ImageSourceMode::sourceFolders,
+                    window);
+                return 0;
+            }
+            break;
+        case kNewPlaylistFileButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                CreateNewPlaylistFile(*state, window);
+                return 0;
+            }
+            break;
+        case kOpenPlaylistFileButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                OpenPlaylistFile(*state, window);
+                return 0;
+            }
+            break;
+        case kSaveAsPlaylistFileButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                SaveAsPlaylistFile(*state, window);
+                return 0;
+            }
+            break;
+        case kPlaylistAddFilesButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                try {
+                    AddPlaylistFilesFromPicker(*state, window);
+                } catch (const Failure& failure) {
                     ShowError(failure.message, window);
                 } catch (const std::exception&) {
-                    SendMessageW(
-                        checkbox,
-                        BM_SETCHECK,
-                        (openWindowSetting
-                            ? state->settings.openWindowOnStart
-                            : state->settings.changeOnStart)
-                            ? BST_CHECKED
-                            : BST_UNCHECKED,
-                        0);
-                    ShowError(L"Could not save the Startup setting.", window);
+                    ShowError(L"Could not add images to the playlist.", window);
                 }
+                return 0;
+            }
+            break;
+        case kPlaylistAddFolderButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                try {
+                    AddPlaylistFolder(*state, window);
+                } catch (const Failure& failure) {
+                    ShowError(failure.message, window);
+                } catch (const std::exception&) {
+                    ShowError(L"Could not add images from the selected folder.", window);
+                }
+                return 0;
+            }
+            break;
+        case kPlaylistRemoveButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RemoveSelectedPlaylistEntries(*state, window);
+                return 0;
+            }
+            break;
+        case kPlaylistDeleteButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                DeleteSelectedPlaylistFileEntries(*state, window);
+                return 0;
+            }
+            break;
+        case kPlaylistRemoveDuplicatesButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RemoveDuplicatePlaylistEntries(*state, window);
                 return 0;
             }
             break;
@@ -4623,18 +7996,32 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 ShowError(L"Could not add the source folder.", window);
             }
             return 0;
-        case kRemoveSourceDirectoryButtonId: {
-            const int selectedRow = ListView_GetNextItem(
-                state->sourceDirectoryList, -1, LVNI_SELECTED);
-            if (selectedRow >= 0 &&
-                static_cast<std::size_t>(selectedRow) <
-                    state->settings.sourceDirectories.size()) {
-                auto directories = state->settings.sourceDirectories;
-                directories.erase(directories.begin() + selectedRow);
-                SaveSourceDirectoryListWithError(*state, std::move(directories), window);
+        case kRemoveSourceDirectoryButtonId:
+            if (state->settings.imageSourceMode ==
+                swc::ImageSourceMode::sourceFolders) {
+                const int selectedRow = ListView_GetNextItem(
+                    state->sourceDirectoryList, -1, LVNI_SELECTED);
+                if (selectedRow >= 0 &&
+                    static_cast<std::size_t>(selectedRow) <
+                        state->settings.sourceDirectories.size()) {
+                    auto directories = state->settings.sourceDirectories;
+                    directories.erase(directories.begin() + selectedRow);
+                    SaveSourceDirectoryListWithError(
+                        *state, std::move(directories), window);
+                }
+            } else {
+                const int selectedRow = ListView_GetNextItem(
+                    state->sourceDirectoryList, -1, LVNI_SELECTED);
+                if (selectedRow >= 0 &&
+                    static_cast<std::size_t>(selectedRow) <
+                        state->settings.recentPlaylistFiles.size()) {
+                    auto playlistFiles = state->settings.recentPlaylistFiles;
+                    playlistFiles.erase(playlistFiles.begin() + selectedRow);
+                    SaveRecentPlaylistListWithError(
+                        *state, std::move(playlistFiles), window);
+                }
             }
             return 0;
-        }
         case kCloseSettingsButtonId:
             if (HIWORD(wParam) == BN_CLICKED) {
                 SendMessageW(window, WM_CLOSE, 0, 0);
@@ -4762,6 +8149,11 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
     case WM_DROPFILES:
             if (state) {
                 HDROP drop = reinterpret_cast<HDROP>(wParam);
+                if (state->settings.imageSourceMode !=
+                    swc::ImageSourceMode::sourceFolders) {
+                    DragFinish(drop);
+                    return 0;
+                }
                 try {
                     const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
                     std::vector<std::filesystem::path> paths;
@@ -4792,6 +8184,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
     case WM_CLOSE:
         if (state) {
+            SaveCountdownDuration(*state, window, true);
             SaveSettingsWindowBoundsWithError(*state, window);
         }
         DestroyWindow(window);
@@ -4802,13 +8195,32 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->settingsWindow = nullptr;
             state->settingsTabs = nullptr;
             state->monitorPreviewPanel = nullptr;
+            state->countdownDisplay = nullptr;
+            state->countdownPreviousButton = nullptr;
+            state->countdownStartStopButton = nullptr;
+            state->countdownPauseResumeButton = nullptr;
+            state->countdownRestartButton = nullptr;
+            state->countdownNextButton = nullptr;
+            state->countdownEnabledCheckbox = nullptr;
+            state->countdownDurationGroup = nullptr;
+            state->countdownHoursEdit = nullptr;
+            state->countdownMinutesEdit = nullptr;
+            state->countdownSecondsEdit = nullptr;
+            state->countdownHoursLabel = nullptr;
+            state->countdownMinutesLabel = nullptr;
+            state->countdownSecondsLabel = nullptr;
             state->changeOnStartCheckbox = nullptr;
             state->openWindowOnStartCheckbox = nullptr;
+            state->startWithWindowsCheckbox = nullptr;
             state->backgroundFillModeLabel = nullptr;
             state->backgroundFillColorModeRadio = nullptr;
             state->backgroundAdaptiveModeRadio = nullptr;
             state->backgroundFillColorLabel = nullptr;
             state->backgroundFillColorButton = nullptr;
+            state->multiMonitorSettingsGroup = nullptr;
+            state->imagePlacementGroup = nullptr;
+            state->sameImageOnDisplaysRadio = nullptr;
+            state->separateImagesOnDisplaysRadio = nullptr;
             state->imageResizeToRadio = nullptr;
             state->imageAutoFitRadio = nullptr;
             state->imageResizeToPercentEdit = nullptr;
@@ -4827,6 +8239,12 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->imageLargeFitRadio = nullptr;
             state->sourceDirectoryList = nullptr;
             state->sourceDirectoryHint = nullptr;
+            state->sourceListGroup = nullptr;
+            state->sourceFoldersModeRadio = nullptr;
+            state->playlistFileModeRadio = nullptr;
+            state->newPlaylistFileButton = nullptr;
+            state->openPlaylistFileButton = nullptr;
+            state->saveAsPlaylistFileButton = nullptr;
             state->playlistList = nullptr;
             state->playlistHint = nullptr;
             state->monitorPreviews.clear();
@@ -4841,6 +8259,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             if (state->settingsFont) {
                 DeleteObject(state->settingsFont);
                 state->settingsFont = nullptr;
+            }
+            if (state->countdownFont) {
+                DeleteObject(state->countdownFont);
+                state->countdownFont = nullptr;
             }
         }
         break;
@@ -4903,20 +8325,24 @@ bool AddTrayIcon(ResidentState& state) {
     state.icon.uID = kTrayIconId;
     state.icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     state.icon.uCallbackMessage = kTrayCallbackMessage;
-    state.icon.hIcon = LoadIconW(state.instance, MAKEINTRESOURCEW(IDI_TRAY_ICON));
-    if (!state.icon.hIcon) {
+    state.defaultTrayIcon =
+        LoadIconW(state.instance, MAKEINTRESOURCEW(IDI_TRAY_ICON));
+    if (!state.defaultTrayIcon) {
         state.startupError = L"Could not load the tray icon resource.";
         return false;
     }
+    state.icon.hIcon = state.defaultTrayIcon;
     lstrcpynW(
         state.icon.szTip,
         L"Simple Wallpaper Changer",
         static_cast<int>(std::size(state.icon.szTip)));
     if (!Shell_NotifyIconW(NIM_ADD, &state.icon)) {
+        state.icon.hIcon = nullptr;
         state.startupError = L"Could not create the tray icon: " + Win32Message(GetLastError());
         return false;
     }
     state.iconAdded = true;
+    state.lastTrayIconKey.clear();
     return true;
 }
 
@@ -4925,6 +8351,12 @@ void RemoveTrayIcon(ResidentState& state) {
         Shell_NotifyIconW(NIM_DELETE, &state.icon);
         state.iconAdded = false;
     }
+    if (state.countdownTrayIcon) {
+        DestroyIcon(state.countdownTrayIcon);
+        state.countdownTrayIcon = nullptr;
+    }
+    state.defaultTrayIcon = nullptr;
+    state.icon.hIcon = nullptr;
 }
 
 void CompleteWallpaperChange(ResidentState& state) {
@@ -4957,9 +8389,18 @@ void CompleteWallpaperChange(ResidentState& state) {
             }
         }
     }
-    if (state.backgroundReapplyPending && !state.shuttingDown) {
+    if (state.timerNextPending && !state.shuttingDown) {
+        state.timerNextPending = false;
+        StartWallpaperChange(state);
+    } else if (state.backgroundReapplyPending && !state.shuttingDown) {
         state.backgroundReapplyPending = false;
-        StartWallpaperChange(state, WallpaperRequest{false, {}, {}, true});
+        const bool reapplyMultiMonitorMode =
+            state.multiMonitorModeReapplyPending;
+        state.multiMonitorModeReapplyPending = false;
+        StartWallpaperChange(
+            state,
+            WallpaperRequest{
+                false, {}, {}, true, reapplyMultiMonitorMode});
     }
 }
 
@@ -5014,10 +8455,39 @@ void ShowTrayMenu(ResidentState& state) {
         ShowError(L"Could not create the tray menu: " + Win32Message(GetLastError()), state.window);
         return;
     }
-    if (!AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") ||
-        !AppendMenuW(menu, MF_STRING, kPreviousCommandId, L"Previous") ||
-        !AppendMenuW(menu, MF_STRING, kSettingsCommandId, L"Settings...") ||
-        !AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit")) {
+    bool menuCreated =
+        AppendMenuW(menu, MF_STRING, kNextCommandId, L"Next") &&
+        AppendMenuW(menu, MF_STRING, kPreviousCommandId, L"Previous") &&
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (menuCreated) {
+        menuCreated = AppendMenuW(
+            menu,
+            MF_STRING,
+            state.settings.countdownEnabled
+                ? kStopCountdownCommandId
+                : kStartCountdownCommandId,
+            state.settings.countdownEnabled
+                ? L"Stop Countdown"
+                : L"Start Countdown");
+    }
+    if (menuCreated && state.settings.countdownEnabled) {
+        menuCreated = AppendMenuW(
+            menu,
+            MF_STRING,
+            state.countdownPaused
+                ? kResumeCountdownCommandId
+                : kPauseCountdownCommandId,
+            state.countdownPaused
+                ? L"Resume Countdown"
+                : L"Pause Countdown");
+    }
+    if (menuCreated) {
+        menuCreated =
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr) &&
+            AppendMenuW(menu, MF_STRING, kSettingsCommandId, L"Settings...") &&
+            AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit");
+    }
+    if (!menuCreated) {
         const DWORD error = GetLastError();
         DestroyMenu(menu);
         ShowError(L"Could not populate the tray menu: " + Win32Message(error), state.window);
@@ -5065,6 +8535,7 @@ void RequestResidentExit(ResidentState& state) {
     }
     state.changeRunning = false;
     if (state.settingsWindow) {
+        SaveCountdownDuration(state, state.settingsWindow, true);
         SaveSettingsWindowBoundsWithError(state, state.settingsWindow);
         DestroyWindow(state.settingsWindow);
     }
@@ -5105,10 +8576,22 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case kNextCommandId:
-            StartWallpaperChange(*state);
+            RequestNextOrPrevious(*state, false);
             return 0;
         case kPreviousCommandId:
-            StartWallpaperChange(*state, WallpaperRequest{true, {}, {}});
+            RequestNextOrPrevious(*state, true);
+            return 0;
+        case kStartCountdownCommandId:
+            StartOrStopCountdown(*state, true, state->window);
+            return 0;
+        case kStopCountdownCommandId:
+            StartOrStopCountdown(*state, false, state->window);
+            return 0;
+        case kPauseCountdownCommandId:
+            ToggleCountdownPause(*state);
+            return 0;
+        case kResumeCountdownCommandId:
+            ToggleCountdownPause(*state);
             return 0;
         case kSettingsCommandId:
             ShowSettingsWindow(*state);
@@ -5130,6 +8613,23 @@ LRESULT CALLBACK ResidentWindowProc(HWND window, UINT message, WPARAM wParam, LP
         if (wParam == kWorkerPollTimerId) {
             CompleteWallpaperChange(*state);
             ProcessPlaylistPackets(*state);
+            if (state->playlistRunning && state->settingsWindow &&
+                TabCtrl_GetCurSel(state->settingsTabs) == 2) {
+                try {
+                    UpdatePlaylistThumbnailPriorities(*state);
+                } catch (const std::exception&) {
+                    CancelPlaylistRefresh(*state);
+                    ShowError(
+                        L"Could not update Playlist thumbnail priorities.",
+                        state->settingsWindow);
+                } catch (...) {
+                    CancelPlaylistRefresh(*state);
+                    ShowError(
+                        L"Could not update Playlist thumbnail priorities.",
+                        state->settingsWindow);
+                }
+            }
+            ProcessCountdownTick(*state);
             return 0;
         }
         break;
@@ -5158,11 +8658,42 @@ int RunResident(HINSTANCE instance) {
 
     const auto settingsPath = ExecutableDirectory() / L"settings.ini";
     InitializeSettingsFile(settingsPath);
-    const auto settings = ReadSettings(settingsPath);
+    auto settings = ReadSettings(settingsPath);
+    const auto executableDirectory = ExecutableDirectory();
+    const auto previousRecentPlaylistFiles = settings.recentPlaylistFiles;
+    NormalizeRecentPlaylistPaths(settings, executableDirectory);
+    const bool recentPlaylistPathsChanged =
+        settings.recentPlaylistFiles != previousRecentPlaylistFiles;
+    const auto playlistPath = InitializePlaylistFilePath(
+        settings, executableDirectory);
+    const bool playlistPathChanged =
+        settings.playlistFilePath != playlistPath.wstring();
+    settings.playlistFilePath = playlistPath.wstring();
+    const bool initializePlaylistHistory =
+        !settings.recentPlaylistHistoryInitialized;
+    if (playlistPathChanged || initializePlaylistHistory) {
+        swc::RememberPlaylistFile(
+            settings.recentPlaylistFiles, settings.playlistFilePath);
+        settings.recentPlaylistHistoryInitialized = true;
+    }
+    auto playlistContents = ReadPlaylistFile(playlistPath);
+    if (playlistPathChanged ||
+        initializePlaylistHistory ||
+        recentPlaylistPathsChanged) {
+        UpdateUserSettings(settingsPath, settings);
+    }
     ResidentState state;
     state.instance = instance;
     state.settingsPath = settingsPath;
     state.settings = settings;
+    state.playlistFileEntries = std::move(playlistContents.imagePaths);
+    state.countdownRemainingSeconds =
+        swc::CountdownDurationSeconds(state.settings);
+    if (state.settings.countdownEnabled) {
+        state.countdownDeadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::seconds(state.countdownRemainingSeconds);
+    }
 
     INITCOMMONCONTROLSEX commonControls{};
     commonControls.dwSize = sizeof(commonControls);

@@ -8,6 +8,41 @@
 
 int main() {
     {
+        const auto result = swc::RemoveDuplicatePlaylistImagePaths({
+            L"C:\\Wallpapers\\one.jpg",
+            L"C:\\Wallpapers\\two.jpg",
+            L"c:\\wallpapers\\ONE.jpg",
+            L"C:\\Wallpapers\\folder\\..\\two.jpg",
+            L"C:\\Wallpapers\\three.jpg"});
+        assert(result.imagePaths.size() == 3);
+        assert(result.imagePaths[0] == L"C:\\Wallpapers\\one.jpg");
+        assert(result.imagePaths[1] == L"C:\\Wallpapers\\two.jpg");
+        assert(result.imagePaths[2] == L"C:\\Wallpapers\\three.jpg");
+        assert(result.duplicatePathCount == 2);
+        assert(result.removedCount == 2);
+    }
+
+    {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(10, 4, 2);
+        assert((order == std::vector<std::size_t>{4, 5, 3, 6, 2, 7, 1, 8, 0, 9}));
+    }
+
+    {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(5, 0, 2);
+        assert((order == std::vector<std::size_t>{0, 1, 2, 3, 4}));
+    }
+
+    {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(5, 99, 2);
+        assert((order == std::vector<std::size_t>{4, 3, 2, 1, 0}));
+    }
+
+    {
+        const auto order = swc::PlaylistThumbnailPriorityOrder(0, 0, 0);
+        assert(order.empty());
+    }
+
+    {
         std::wistringstream input(
             L"; whole-line comment\n"
             L"source_directories = C:\\Wallpapers ; inline comment\n"
@@ -44,6 +79,8 @@ int main() {
         assert(settings.sourceDirectories[3].path == L"C:\\First");
         assert(settings.sourceDirectories[3].enabled);
         assert(swc::SerializeSourceDirectory(settings.sourceDirectories[1]) == L"-D:\\Disabled");
+        assert(settings.imageSourceMode == swc::ImageSourceMode::sourceFolders);
+        assert(settings.playlistFilePath.empty());
         assert(swc::HasEnabledSourceDirectory(settings.sourceDirectories));
         assert(!swc::HasEnabledSourceDirectory({}));
         assert(!swc::HasEnabledSourceDirectory({{L"C:\\First", false}}));
@@ -61,6 +98,81 @@ int main() {
     {
         std::wistringstream input(L"source_directory=C:\\Legacy\n");
         assert(swc::ParseSettings(input).sourceDirectories.empty());
+    }
+
+    {
+        std::wistringstream input(
+            L"image_source_mode=PLAYLIST_FILE\n"
+            L"playlist_file=C:\\Wallpapers\\My playlist.txt\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.imageSourceMode == swc::ImageSourceMode::playlistFile);
+        assert(settings.playlistFilePath ==
+            L"C:\\Wallpapers\\My playlist.txt");
+        assert(settings.lastPlaylistImportFolder.empty());
+    }
+
+    {
+        std::wistringstream input(
+            L"last_playlist_import_folder=D:\\Pictures\\Summer\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.lastPlaylistImportFolder == L"D:\\Pictures\\Summer");
+    }
+
+    {
+        std::wistringstream input(
+            L"recent_playlist_history_initialized=true\n"
+            L"recent_playlist_file=C:\\Wallpapers\\one.txt\n"
+            L"recent_playlist_file=D:\\Wallpapers\\two.txt\n"
+            L"recent_playlist_file=c:\\wallpapers\\ONE.TXT\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.recentPlaylistHistoryInitialized);
+        assert(settings.recentPlaylistFiles.size() == 2);
+        assert(settings.recentPlaylistFiles[0] ==
+            L"c:\\wallpapers\\ONE.TXT");
+        assert(settings.recentPlaylistFiles[1] ==
+            L"D:\\Wallpapers\\two.txt");
+    }
+
+    {
+        std::vector<std::wstring> playlistFiles;
+        for (std::size_t index = 0;
+             index <= swc::kMaxRecentPlaylistFiles;
+             ++index) {
+            swc::RememberPlaylistFile(
+                playlistFiles,
+                L"C:\\Playlists\\" + std::to_wstring(index) + L".txt");
+        }
+        assert(playlistFiles.size() == swc::kMaxRecentPlaylistFiles);
+        assert(playlistFiles.front() == L"C:\\Playlists\\10.txt");
+        assert(playlistFiles.back() == L"C:\\Playlists\\1.txt");
+    }
+
+    {
+        std::wistringstream input(
+            L"image_source_mode=invalid\n"
+            L"playlist_file=\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.imageSourceMode == swc::ImageSourceMode::sourceFolders);
+        assert(settings.playlistFilePath.empty());
+    }
+
+    {
+        std::wistringstream input(
+            L" C:\\Wallpapers\\one.jpg \r\n"
+            L"not an image\n"
+            L"\r\n"
+            L"C:\\Wallpapers\\two.png\n"
+            L"missing.jpg\n");
+        const auto playlist = swc::ParsePlaylistFile(
+            input,
+            [](const std::wstring& row) {
+                return row == L"C:\\Wallpapers\\one.jpg" ||
+                    row == L"C:\\Wallpapers\\two.png";
+            });
+        assert(playlist.imagePaths.size() == 2);
+        assert(playlist.imagePaths[0] == L"C:\\Wallpapers\\one.jpg");
+        assert(playlist.imagePaths[1] == L"C:\\Wallpapers\\two.png");
+        assert(playlist.invalidLineCount == 2);
     }
 
     {
@@ -96,6 +208,21 @@ int main() {
     {
         std::wistringstream input(L"open_window_on_start=invalid\n");
         assert(!swc::ParseSettings(input).openWindowOnStart);
+    }
+
+    {
+        std::wistringstream input(L"");
+        assert(!swc::ParseSettings(input).startWithWindows);
+    }
+
+    {
+        std::wistringstream input(L"start_with_windows=TrUe\n");
+        assert(swc::ParseSettings(input).startWithWindows);
+    }
+
+    {
+        std::wistringstream input(L"start_with_windows=invalid\n");
+        assert(!swc::ParseSettings(input).startWithWindows);
     }
 
     {
@@ -160,6 +287,13 @@ int main() {
         assert(settings.smallImageMode == swc::SmallImageMode::fit);
         assert(settings.maxSmallImageEnlargePercent == 400);
         assert(settings.largeImageMode == swc::LargeImageMode::fit);
+        assert(settings.multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::separateImages);
+        assert(!settings.countdownEnabled);
+        assert(settings.countdownHours == 0);
+        assert(settings.countdownMinutes == 10);
+        assert(settings.countdownSeconds == 0);
+        assert(swc::CountdownDurationSeconds(settings) == 600);
     }
 
     {
@@ -168,13 +302,80 @@ int main() {
             L"resize_to_percent=125\n"
             L"autofit_small=tile\n"
             L"autofit_max_enlarge_percent=250\n"
-            L"autofit_large=fill\n");
+            L"autofit_large=fill\n"
+            L"multi_monitor_image_mode=SAME_IMAGE\n");
         const auto settings = swc::ParseSettings(input);
         assert(settings.imageSizingMode == swc::ImageSizingMode::resizeTo);
         assert(settings.resizeToPercent == 125);
         assert(settings.smallImageMode == swc::SmallImageMode::tile);
         assert(settings.maxSmallImageEnlargePercent == 250);
         assert(settings.largeImageMode == swc::LargeImageMode::fill);
+        assert(settings.multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::sameImage);
+    }
+
+    {
+        std::wistringstream input(L"multi_monitor_image_mode=SePaRaTe_ImAgEs\n");
+        assert(swc::ParseSettings(input).multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::separateImages);
+    }
+
+    {
+        std::wistringstream input(
+            L"countdown_enabled=TRUE\n"
+            L"countdown_hours=12\n"
+            L"countdown_minutes=34\n"
+            L"countdown_seconds=56\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.countdownEnabled);
+        assert(settings.countdownHours == 12);
+        assert(settings.countdownMinutes == 34);
+        assert(settings.countdownSeconds == 56);
+        assert(swc::CountdownDurationSeconds(settings) == 45296);
+    }
+
+    {
+        std::uint32_t seconds = 0;
+        assert(swc::ParseCountdownDuration(L"99", L"59", L"59", seconds));
+        assert(seconds == 359999);
+        assert(!swc::ParseCountdownDuration(L"100", L"0", L"0", seconds));
+        assert(!swc::ParseCountdownDuration(L"0", L"60", L"0", seconds));
+        assert(!swc::ParseCountdownDuration(L"0", L"0", L"60", seconds));
+        assert(!swc::ParseCountdownDuration(L"0", L"0", L"0", seconds));
+        assert(!swc::ParseCountdownDuration(L"1h", L"0", L"0", seconds));
+    }
+
+    {
+        assert(swc::FormatCountdownTrayValue(0) == L"00");
+        assert(swc::FormatCountdownTrayValue(9) == L"09");
+        assert(swc::FormatCountdownTrayValue(65) == L"01");
+        assert(swc::FormatCountdownTrayValue(59 * 60 + 59) == L"59");
+        assert(swc::FormatCountdownTrayValue(3600 + 5 * 60 + 9) == L"01");
+        assert(swc::FormatCountdownTrayValue(99 * 3600 + 59 * 60 + 59) == L"99");
+    }
+
+    {
+        std::wistringstream input(
+            L"countdown_enabled=true\n"
+            L"countdown_hours=100\n"
+            L"countdown_minutes=99\n"
+            L"countdown_seconds=0\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.countdownEnabled);
+        assert(settings.countdownHours == 0);
+        assert(settings.countdownMinutes == 10);
+        assert(settings.countdownSeconds == 0);
+    }
+
+    {
+        std::wistringstream input(
+            L"countdown_enabled=true\n"
+            L"countdown_hours=0\n"
+            L"countdown_minutes=0\n"
+            L"countdown_seconds=0\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(!settings.countdownEnabled);
+        assert(swc::CountdownDurationSeconds(settings) == 600);
     }
 
     {
@@ -184,12 +385,15 @@ int main() {
             L"autofit_max_enlarge_percent=99\n"
             L"autofit_max_enlarge_percent=1001\n"
             L"autofit_small=invalid\n"
-            L"autofit_large=invalid\n");
+            L"autofit_large=invalid\n"
+            L"multi_monitor_image_mode=invalid\n");
         const auto settings = swc::ParseSettings(input);
         assert(settings.resizeToPercent == 90);
         assert(settings.maxSmallImageEnlargePercent == 400);
         assert(settings.smallImageMode == swc::SmallImageMode::fit);
         assert(settings.largeImageMode == swc::LargeImageMode::fit);
+        assert(settings.multiMonitorImageMode ==
+            swc::MultiMonitorImageMode::separateImages);
     }
 
     assert(swc::IsSupportedExtension(L".JPG"));
