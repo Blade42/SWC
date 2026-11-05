@@ -28,6 +28,7 @@
 #include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -113,8 +114,15 @@ constexpr int kNewPlaylistFileButtonId = 2063;
 constexpr int kOpenPlaylistFileButtonId = 2064;
 constexpr int kSaveAsPlaylistFileButtonId = 2065;
 constexpr int kSourceListGroupId = 2066;
+constexpr int kPlaylistAddFilesButtonId = 2067;
+constexpr int kPlaylistAddFolderButtonId = 2068;
+constexpr int kPlaylistRemoveButtonId = 2069;
+constexpr int kPlaylistDeleteButtonId = 2070;
+constexpr int kPlaylistRemoveDuplicatesButtonId = 2071;
 constexpr UINT kSetDisplayCommandBase = 40000;
 constexpr UINT kDeletePlaylistImageCommandId = 1100;
+constexpr UINT kRemovePlaylistEntriesCommandId = 1101;
+constexpr UINT kDeletePlaylistEntriesCommandId = 1102;
 constexpr int kPlaylistThumbnailSize = 64;
 constexpr std::size_t kPlaylistThumbnailCacheLimit = 512;
 constexpr int kSettingsContentWidth = 968;
@@ -1729,6 +1737,8 @@ void WriteSettingsFile(
                 : L"source_folders") + L"\r\n"
         L"; Last used playlist file; relative paths use the executable folder.\r\n"
         L"playlist_file=" + settings.playlistFilePath + L"\r\n"
+        L"; Last folder used to add images to the Playlist; maintained automatically.\r\n"
+        L"last_playlist_import_folder=" + settings.lastPlaylistImportFolder + L"\r\n"
         L"; Recent playlist files, newest first; up to 10 entries.\r\n";
     contents += L"recent_playlist_history_initialized=" +
         std::wstring(
@@ -2087,6 +2097,7 @@ void UpdateUserSettings(
     settings.sourceDirectories = preferences.sourceDirectories;
     settings.imageSourceMode = preferences.imageSourceMode;
     settings.playlistFilePath = preferences.playlistFilePath;
+    settings.lastPlaylistImportFolder = preferences.lastPlaylistImportFolder;
     settings.recentPlaylistFiles = preferences.recentPlaylistFiles;
     settings.recentPlaylistHistoryInitialized =
         preferences.recentPlaylistHistoryInitialized;
@@ -2105,6 +2116,15 @@ void UpdateUserSettings(
     settings.countdownHours = preferences.countdownHours;
     settings.countdownMinutes = preferences.countdownMinutes;
     settings.countdownSeconds = preferences.countdownSeconds;
+    WriteSettingsFile(path, settings);
+}
+
+void UpdateLastPlaylistImportFolder(
+    const std::filesystem::path& path,
+    const std::wstring& directory) {
+    std::lock_guard<std::mutex> lock(gSettingsMutex);
+    auto settings = ReadSettingsFile(path);
+    settings.lastPlaylistImportFolder = directory;
     WriteSettingsFile(path, settings);
 }
 
@@ -2163,9 +2183,20 @@ void Run(const WallpaperRequest& request) {
     const auto executableDirectory = ExecutableDirectory();
     const auto settingsPath = executableDirectory / L"settings.ini";
     const auto settings = ReadSettings(settingsPath);
-    const auto images = request.reapplyCurrent && !request.reapplyMultiMonitorMode
-        ? std::vector<SourceImage>{}
-        : FindSourceImages(settings.sourceDirectories, executableDirectory);
+    std::vector<SourceImage> images;
+    if (!request.reapplyCurrent || request.reapplyMultiMonitorMode) {
+        if (settings.imageSourceMode == swc::ImageSourceMode::playlistFile) {
+            const auto playlist =
+                ReadPlaylistFile(settings.playlistFilePath);
+            images.reserve(playlist.imagePaths.size());
+            for (const auto& imagePath : playlist.imagePaths) {
+                images.push_back({std::filesystem::path(imagePath), 0});
+            }
+        } else {
+            images = FindSourceImages(
+                settings.sourceDirectories, executableDirectory);
+        }
+    }
     if (images.empty() && !request.reapplyCurrent) {
         return;
     }
@@ -2757,6 +2788,11 @@ struct ResidentState {
     HWND saveAsPlaylistFileButton = nullptr;
     HWND playlistList = nullptr;
     HWND playlistHint = nullptr;
+    HWND playlistAddFilesButton = nullptr;
+    HWND playlistAddFolderButton = nullptr;
+    HWND playlistRemoveButton = nullptr;
+    HWND playlistDeleteButton = nullptr;
+    HWND playlistRemoveDuplicatesButton = nullptr;
     HFONT settingsFont = nullptr;
     HFONT countdownFont = nullptr;
     HIMAGELIST playlistImageList = nullptr;
@@ -2781,6 +2817,9 @@ struct ResidentState {
     int playlistPriorityFirstVisibleRow = -1;
     int playlistPriorityVisibleRowCount = -1;
     bool playlistRowsApplied = false;
+    std::wstring playlistOperationStatus;
+    std::vector<std::size_t> playlistPendingSelectionRows;
+    std::uint64_t playlistPendingSelectionGeneration = 0;
     bool playlistRunning = false;
     bool playlistRefreshPending = false;
     std::wstring settingsWindowError;
@@ -3266,6 +3305,7 @@ void DrawPlaylistFileButton(const DRAWITEMSTRUCT& draw) {
 
     switch (GetDlgCtrlID(draw.hwndItem)) {
     case kAddSourceDirectoryButtonId:
+    case kPlaylistAddFolderButtonId:
     {
         POINT folder[] = {
             {centerX - 11, centerY - 5},
@@ -3282,6 +3322,13 @@ void DrawPlaylistFileButton(const DRAWITEMSTRUCT& draw) {
         LineTo(draw.hDC, centerX + 11, centerY + 7);
         break;
     }
+    case kPlaylistAddFilesButtonId:
+        Rectangle(draw.hDC, centerX - 7, centerY - 10, centerX + 6, centerY + 10);
+        MoveToEx(draw.hDC, centerX - 3, centerY, nullptr);
+        LineTo(draw.hDC, centerX + 3, centerY);
+        MoveToEx(draw.hDC, centerX, centerY - 3, nullptr);
+        LineTo(draw.hDC, centerX, centerY + 3);
+        break;
     case kNewPlaylistFileButtonId:
         Rectangle(draw.hDC, centerX - 7, centerY - 10, centerX + 6, centerY + 10);
         MoveToEx(draw.hDC, centerX - 3, centerY, nullptr);
@@ -3308,6 +3355,8 @@ void DrawPlaylistFileButton(const DRAWITEMSTRUCT& draw) {
         Rectangle(draw.hDC, centerX - 5, centerY + 1, centerX + 5, centerY + 7);
         break;
     case kRemoveSourceDirectoryButtonId:
+    case kPlaylistRemoveButtonId:
+    case kPlaylistDeleteButtonId:
         MoveToEx(draw.hDC, centerX - 9, centerY - 7, nullptr);
         LineTo(draw.hDC, centerX + 9, centerY - 7);
         MoveToEx(draw.hDC, centerX - 5, centerY - 10, nullptr);
@@ -3320,6 +3369,13 @@ void DrawPlaylistFileButton(const DRAWITEMSTRUCT& draw) {
         LineTo(draw.hDC, centerX - 2, centerY + 6);
         MoveToEx(draw.hDC, centerX + 2, centerY - 3, nullptr);
         LineTo(draw.hDC, centerX + 2, centerY + 6);
+        break;
+    case kPlaylistRemoveDuplicatesButtonId:
+        Rectangle(draw.hDC, centerX - 9, centerY - 8, centerX + 4, centerY + 8);
+        Rectangle(draw.hDC, centerX - 4, centerY - 5, centerX + 9, centerY + 11);
+        MoveToEx(draw.hDC, centerX - 1, centerY + 3, nullptr);
+        LineTo(draw.hDC, centerX + 2, centerY + 6);
+        LineTo(draw.hDC, centerX + 7, centerY);
         break;
     default:
         break;
@@ -4083,10 +4139,14 @@ void FinishPlaylistRefresh(ResidentState& state) {
 }
 
 void SetPlaylistHint(ResidentState& state, bool loading) {
-    const std::wstring hintText = loading
+    const std::wstring hintText = !state.playlistOperationStatus.empty()
+        ? state.playlistOperationStatus
+        : loading
         ? L"Loading playlist; thumbnails will appear as they are ready..."
         : state.playlistSources.empty()
-        ? L"No supported images were found in the enabled source folders."
+        ? state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile
+            ? L"The active playlist contains no supported images."
+            : L"No supported images were found in the enabled source folders."
         : state.playlistInvalidCount == 0
         ? L"Double-click to start with an image, or right-click to set it on one display."
         : std::to_wstring(state.playlistInvalidCount) +
@@ -4111,6 +4171,7 @@ void StartPlaylistRefresh(ResidentState& state) {
         state.playlistThread.join();
     }
 
+    const bool preservePendingSelection = state.playlistRefreshPending;
     const int initialFirstVisibleRow =
         std::max(0, ListView_GetTopIndex(state.playlistList));
     const int initialVisibleRowCount =
@@ -4124,6 +4185,11 @@ void StartPlaylistRefresh(ResidentState& state) {
     state.playlistPriorityFirstVisibleRow = -1;
     state.playlistPriorityVisibleRowCount = -1;
     state.playlistRowsApplied = false;
+    if (!preservePendingSelection) {
+        state.playlistOperationStatus.clear();
+        state.playlistPendingSelectionRows.clear();
+        state.playlistPendingSelectionGeneration = 0;
+    }
     state.playlistRunning = true;
     state.playlistRefreshPending = false;
     state.playlistSources.clear();
@@ -4143,6 +4209,7 @@ void StartPlaylistRefresh(ResidentState& state) {
     const auto cache = state.playlistThumbnailCache;
     const auto settingsPath = state.settingsPath;
     const auto executableDirectory = ExecutableDirectory();
+    const auto playlistFileEntries = state.playlistFileEntries;
     try {
         state.playlistThread = std::thread(
             [&state,
@@ -4153,12 +4220,22 @@ void StartPlaylistRefresh(ResidentState& state) {
                 initialVisibleRowCount,
                 cache,
                 settingsPath,
-                executableDirectory]() {
+                executableDirectory,
+                playlistFileEntries]() {
                 std::wstring failureMessage;
                 try {
                     const auto settings = ReadSettings(settingsPath);
-                    const auto sources =
-                        FindSourceImages(settings.sourceDirectories, executableDirectory);
+                    std::vector<SourceImage> sources;
+                    if (settings.imageSourceMode == swc::ImageSourceMode::playlistFile) {
+                        sources.reserve(playlistFileEntries.size());
+                        for (const auto& entry : playlistFileEntries) {
+                            sources.push_back(
+                                {std::filesystem::path(entry), 0});
+                        }
+                    } else {
+                        sources = FindSourceImages(
+                            settings.sourceDirectories, executableDirectory);
+                    }
                     {
                         const auto initialOrder = swc::PlaylistThumbnailPriorityOrder(
                             sources.size(),
@@ -4306,6 +4383,7 @@ void StartPlaylistRefresh(ResidentState& state) {
 }
 
 void UpdatePlaylistThumbnailPriorities(ResidentState& state, bool force = false);
+void SyncPlaylistEditControls(ResidentState& state);
 
 void ApplyPlaylistRows(ResidentState& state, PlaylistRefreshPacket& packet) {
     ListView_DeleteAllItems(state.playlistList);
@@ -4376,9 +4454,43 @@ void ApplyPlaylistRows(ResidentState& state, PlaylistRefreshPacket& packet) {
     InvalidateRect(state.playlistList, nullptr, TRUE);
     state.playlistRowsApplied = true;
     UpdatePlaylistThumbnailPriorities(state, true);
-    RefreshPlaylistDisplayAssignments(state, packet.settings, true);
+    const bool selectPendingRows =
+        !state.playlistPendingSelectionRows.empty() &&
+        state.playlistPendingSelectionGeneration == packet.generation;
+    RefreshPlaylistDisplayAssignments(
+        state, packet.settings, !selectPendingRows);
+    if (selectPendingRows) {
+        ListView_SetItemState(
+            state.playlistList, -1, 0, LVIS_SELECTED | LVIS_FOCUSED);
+        for (const std::size_t row : state.playlistPendingSelectionRows) {
+            if (row < state.playlistSources.size()) {
+                ListView_SetItemState(
+                    state.playlistList,
+                    static_cast<int>(row),
+                    LVIS_SELECTED,
+                    LVIS_SELECTED);
+            }
+        }
+        const std::size_t firstRow = state.playlistPendingSelectionRows.front();
+        if (firstRow < state.playlistSources.size()) {
+            const int item = static_cast<int>(firstRow);
+            ListView_EnsureVisible(state.playlistList, item, FALSE);
+            RECT client{};
+            RECT bounds{};
+            if (GetClientRect(state.playlistList, &client) &&
+                ListView_GetItemRect(state.playlistList, item, &bounds, LVIR_BOUNDS)) {
+                const int delta = client.top - bounds.top;
+                if (delta != 0) {
+                    ListView_Scroll(state.playlistList, 0, delta);
+                }
+            }
+        }
+        state.playlistPendingSelectionRows.clear();
+        state.playlistPendingSelectionGeneration = 0;
+    }
     SetPlaylistHint(state, true);
     UpdatePlaylistThumbnailPriorities(state, true);
+    SyncPlaylistEditControls(state);
 }
 
 void UpdatePlaylistThumbnailPriorities(ResidentState& state, bool force) {
@@ -4784,6 +4896,87 @@ HWND CreateSettingsControl(
     return control;
 }
 
+std::vector<std::filesystem::path> SelectPlaylistImportPaths(
+    HWND owner,
+    const std::filesystem::path& initialDirectory) {
+    ComPtr<IFileOpenDialog> dialog;
+    CheckHr(
+        CoCreateInstance(
+            CLSID_FileOpenDialog,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(dialog.Put())),
+        L"Could not open the image selection dialog");
+
+    static constexpr COMDLG_FILTERSPEC fileTypes[] = {
+        {L"Supported image files", L"*.jpg;*.jpeg;*.png;*.webp"}};
+    CheckHr(
+        dialog->SetFileTypes(
+            static_cast<UINT>(std::size(fileTypes)), fileTypes),
+        L"Could not configure the image selection dialog");
+
+    FILEOPENDIALOGOPTIONS options = 0;
+    CheckHr(
+        dialog->GetOptions(&options),
+        L"Could not configure the image selection dialog");
+    CheckHr(
+        dialog->SetOptions(
+            options | FOS_ALLOWMULTISELECT | FOS_FORCEFILESYSTEM |
+                FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR),
+        L"Could not configure the image selection dialog");
+    CheckHr(
+        dialog->SetTitle(L"Add images to playlist"),
+        L"Could not set the image selection dialog title");
+
+    if (!initialDirectory.empty()) {
+        ComPtr<IShellItem> initialFolder;
+        CheckHr(
+            SHCreateItemFromParsingName(
+                initialDirectory.c_str(),
+                nullptr,
+                IID_PPV_ARGS(initialFolder.Put())),
+            L"Could not locate the initial image folder");
+        CheckHr(
+            dialog->SetFolder(initialFolder.Get()),
+            L"Could not select the initial image folder");
+    }
+
+    const HRESULT showResult = dialog->Show(owner);
+    if (showResult == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+        return {};
+    }
+    CheckHr(showResult, L"Could not show the image selection dialog");
+
+    ComPtr<IShellItemArray> selectedItems;
+    CheckHr(
+        dialog->GetResults(selectedItems.Put()),
+        L"Could not read the selected image files");
+    DWORD selectedCount = 0;
+    CheckHr(
+        selectedItems->GetCount(&selectedCount),
+        L"Could not count the selected image files");
+
+    std::vector<std::filesystem::path> selectedPaths;
+    selectedPaths.reserve(selectedCount);
+    for (DWORD index = 0; index < selectedCount; ++index) {
+        ComPtr<IShellItem> selectedItem;
+        CheckHr(
+            selectedItems->GetItemAt(index, selectedItem.Put()),
+            L"Could not read a selected image file");
+        PWSTR rawPath = nullptr;
+        CheckHr(
+            selectedItem->GetDisplayName(SIGDN_FILESYSPATH, &rawPath),
+            L"Could not read a selected image file path");
+        std::unique_ptr<wchar_t, decltype(&CoTaskMemFree)> selectedPath(
+            rawPath, CoTaskMemFree);
+        if (!selectedPath) {
+            Fail(L"A selected image file path is empty.");
+        }
+        selectedPaths.emplace_back(selectedPath.get());
+    }
+    return selectedPaths;
+}
+
 void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeight) {
     if (!state.settingsTabs) {
         return;
@@ -4967,13 +5160,27 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
         28,
         186,
         clientWidth - 56,
-        clientHeight - 295);
+        clientHeight - 336);
     moveControl(
         state.playlistHint,
         28,
-        clientHeight - 99,
+        clientHeight - 138,
         clientWidth - 56,
         28);
+    const HWND playlistActionButtons[] = {
+        state.playlistAddFilesButton,
+        state.playlistAddFolderButton,
+        state.playlistRemoveButton,
+        state.playlistDeleteButton,
+        state.playlistRemoveDuplicatesButton};
+    int playlistActionX = 28;
+    for (const HWND button : playlistActionButtons) {
+        const int buttonWidth = naturalActionButtonWidth(button);
+        if (buttonWidth > 0) {
+            moveControl(button, playlistActionX, clientHeight - 104, buttonWidth, 32);
+            playlistActionX += buttonWidth + 8;
+        }
+    }
     moveControl(state.backgroundFillModeLabel, 30, 190, clientWidth - 60, 28);
     moveControl(state.backgroundFillColorModeRadio, 30, 222, 500, 28);
     moveControl(state.backgroundFillColorLabel, 58, 260, 122, 28);
@@ -5210,6 +5417,8 @@ void SyncImageSizingControls(ResidentState& state) {
     }
 }
 
+void SyncPlaylistEditControls(ResidentState& state);
+
 void ShowSettingsPage(ResidentState& state) {
     const int page = TabCtrl_GetCurSel(state.settingsTabs);
     const bool startupPage = page == 0;
@@ -5244,6 +5453,24 @@ void ShowSettingsPage(ResidentState& state) {
         playlistFileSourcePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.playlistList, page == 2 ? SW_SHOW : SW_HIDE);
     ShowWindow(state.playlistHint, page == 2 ? SW_SHOW : SW_HIDE);
+    const bool playlistFilePage =
+        page == 2 &&
+        state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile;
+    ShowWindow(
+        state.playlistAddFilesButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistAddFolderButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistRemoveButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistDeleteButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
+    ShowWindow(
+        state.playlistRemoveDuplicatesButton,
+        playlistFilePage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.backgroundFillModeLabel, backgroundPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.backgroundFillColorModeRadio, backgroundPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.backgroundAdaptiveModeRadio, backgroundPage ? SW_SHOW : SW_HIDE);
@@ -5288,6 +5515,7 @@ void ShowSettingsPage(ResidentState& state) {
     SyncImageSizingControls(state);
     SyncCountdownControls(state);
     RefreshCountdownDisplay(state);
+    SyncPlaylistEditControls(state);
 }
 
 void SaveSourceDirectoryListWithError(
@@ -6098,6 +6326,9 @@ void ChooseBackgroundFillColor(ResidentState& state, HWND owner) {
 
 std::vector<int> SelectedPlaylistRows(const ResidentState& state) {
     std::vector<int> rows;
+    if (!state.playlistList) {
+        return rows;
+    }
     for (int row = ListView_GetNextItem(state.playlistList, -1, LVNI_SELECTED);
          row >= 0;
          row = ListView_GetNextItem(state.playlistList, row, LVNI_SELECTED)) {
@@ -6106,6 +6337,20 @@ std::vector<int> SelectedPlaylistRows(const ResidentState& state) {
         }
     }
     return rows;
+}
+
+void SyncPlaylistEditControls(ResidentState& state) {
+    const bool enabled =
+        state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile &&
+        !SelectedPlaylistRows(state).empty();
+    for (const HWND button : {
+             state.playlistRemoveButton,
+             state.playlistDeleteButton}) {
+        if (button) {
+            EnableWindow(button, enabled);
+            InvalidateRect(button, nullptr, TRUE);
+        }
+    }
 }
 
 int SelectPlaylistRowForAction(ResidentState& state, int row) {
@@ -6141,12 +6386,11 @@ void RefreshPlaylistAfterDeletion(ResidentState& state, HWND owner) {
     }
 }
 
-void DeletePlaylistImages(
-    ResidentState& state,
+bool DeletePlaylistImagesFromDisk(
     const std::vector<std::filesystem::path>& imagePaths,
     HWND owner) {
     if (imagePaths.empty()) {
-        return;
+        return false;
     }
 
     std::wstring message = L"Are you sure you want to delete ";
@@ -6173,7 +6417,7 @@ void DeletePlaylistImages(
             message.c_str(),
             L"Delete Playlist images",
             MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
-        return;
+        return false;
     }
 
     std::wstring pathList;
@@ -6197,9 +6441,293 @@ void DeletePlaylistImages(
             L"Could not delete all selected Playlist images: " +
                 Win32Message(error),
             owner);
+        return false;
     }
 
+    return true;
+}
+
+void DeletePlaylistImages(
+    ResidentState& state,
+    const std::vector<std::filesystem::path>& imagePaths,
+    HWND owner) {
+    if (!DeletePlaylistImagesFromDisk(imagePaths, owner)) {
+        return;
+    }
     RefreshPlaylistAfterDeletion(state, owner);
+}
+
+bool SaveEditedPlaylistFile(
+    ResidentState& state,
+    std::vector<std::wstring> entries,
+    std::wstring status,
+    std::vector<std::size_t> selectedRows,
+    HWND owner) {
+    try {
+        WritePlaylistFile(state.settings.playlistFilePath, entries);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+        return false;
+    } catch (const std::exception&) {
+        ShowError(L"Could not save the active playlist file.", owner);
+        return false;
+    }
+
+    state.playlistFileEntries = std::move(entries);
+    state.playlistFileDirty = false;
+    try {
+        StartPlaylistRefresh(state);
+    } catch (const Failure& failure) {
+        ShowError(failure.message, owner);
+    } catch (const std::exception&) {
+        ShowError(L"Could not refresh the Playlist after editing.", owner);
+    }
+    state.playlistPendingSelectionRows = std::move(selectedRows);
+    state.playlistPendingSelectionGeneration =
+        state.playlistGeneration + (state.playlistRefreshPending ? 1 : 0);
+    state.playlistOperationStatus = std::move(status);
+    SetPlaylistHint(state, state.playlistRunning);
+    SyncPlaylistEditControls(state);
+    return true;
+}
+
+void AddPlaylistPaths(
+    ResidentState& state,
+    const std::vector<std::filesystem::path>& selectedPaths,
+    HWND owner) {
+    std::vector<std::wstring> importedPaths;
+    for (const auto& selectedPath : selectedPaths) {
+        std::error_code error;
+        const bool directory = std::filesystem::is_directory(selectedPath, error);
+        if (error) {
+            Fail(L"Could not inspect the selected path \"" +
+                selectedPath.wstring() + L"\": " + FilesystemErrorText(error));
+        }
+        std::vector<std::filesystem::path> images;
+        if (directory) {
+            images = FindImages(selectedPath);
+        } else {
+            const bool regularFile =
+                std::filesystem::is_regular_file(selectedPath, error);
+            if (error) {
+                Fail(L"Could not inspect the selected image \"" +
+                    selectedPath.wstring() + L"\": " +
+                    FilesystemErrorText(error));
+            }
+            if (regularFile &&
+                swc::IsSupportedExtension(selectedPath.extension().wstring()) &&
+                !IsGeneratedWallpaperFile(selectedPath)) {
+                images.push_back(selectedPath);
+            }
+        }
+        for (const auto& image : images) {
+            const auto absolute = std::filesystem::absolute(image, error);
+            if (error) {
+                Fail(L"Could not resolve an imported image path: " +
+                    FilesystemErrorText(error));
+            }
+            importedPaths.push_back(absolute.lexically_normal().wstring());
+        }
+    }
+
+    if (importedPaths.empty()) {
+        state.playlistOperationStatus = L"Added 0 images to the playlist.";
+        SetPlaylistHint(state, state.playlistRunning);
+        return;
+    }
+    auto entries = state.playlistFileEntries;
+    const std::size_t firstAddedRow = entries.size();
+    entries.insert(
+        entries.end(), importedPaths.begin(), importedPaths.end());
+    std::vector<std::size_t> selectedRows;
+    selectedRows.reserve(importedPaths.size());
+    for (std::size_t index = 0; index < importedPaths.size(); ++index) {
+        selectedRows.push_back(firstAddedRow + index);
+    }
+    SaveEditedPlaylistFile(
+        state,
+        std::move(entries),
+        L"Added " + std::to_wstring(importedPaths.size()) +
+            L" image(s) to the playlist.",
+        std::move(selectedRows),
+        owner);
+}
+
+std::filesystem::path PlaylistImportInitialDirectory(
+    const ResidentState& state) {
+    std::filesystem::path directory(state.settings.lastPlaylistImportFolder);
+    if (directory.empty()) {
+        return ExecutableDirectory();
+    }
+    if (directory.is_relative()) {
+        directory = ExecutableDirectory() / directory;
+    }
+
+    std::error_code error;
+    const bool exists = std::filesystem::is_directory(directory, error);
+    if (error &&
+        error != std::errc::no_such_file_or_directory &&
+        error != std::errc::not_a_directory) {
+        Fail(L"Could not inspect the last Playlist import folder: " +
+            FilesystemErrorText(error));
+    }
+    if (!exists) {
+        return ExecutableDirectory();
+    }
+
+    const auto absoluteDirectory = std::filesystem::absolute(directory, error);
+    if (error) {
+        Fail(L"Could not resolve the last Playlist import folder: " +
+            FilesystemErrorText(error));
+    }
+    return absoluteDirectory.lexically_normal();
+}
+
+void RememberPlaylistImportFolder(
+    ResidentState& state,
+    const std::filesystem::path& directory) {
+    std::error_code error;
+    const auto absoluteDirectory = std::filesystem::absolute(directory, error);
+    if (error) {
+        Fail(L"Could not resolve the selected Playlist import folder: " +
+            FilesystemErrorText(error));
+    }
+    if (!std::filesystem::is_directory(absoluteDirectory, error)) {
+        Fail(L"Could not verify the selected Playlist import folder: " +
+            (error
+                ? FilesystemErrorText(error)
+                : L"The selected path is not a folder."));
+    }
+
+    const std::wstring normalizedDirectory =
+        absoluteDirectory.lexically_normal().wstring();
+    UpdateLastPlaylistImportFolder(
+        state.settingsPath, normalizedDirectory);
+    state.settings.lastPlaylistImportFolder = normalizedDirectory;
+}
+
+void AddPlaylistFilesFromPicker(ResidentState& state, HWND owner) {
+    const auto initialDirectory = PlaylistImportInitialDirectory(state);
+    const auto selectedPaths =
+        SelectPlaylistImportPaths(owner, initialDirectory);
+    if (!selectedPaths.empty()) {
+        RememberPlaylistImportFolder(state, selectedPaths.front().parent_path());
+        AddPlaylistPaths(state, selectedPaths, owner);
+    }
+}
+
+void AddPlaylistFolder(ResidentState& state, HWND owner) {
+    const auto initialDirectory = PlaylistImportInitialDirectory(state);
+    const auto selectedDirectory = SelectSourceDirectory(
+        owner, initialDirectory.wstring());
+    if (!selectedDirectory.empty()) {
+        RememberPlaylistImportFolder(
+            state, std::filesystem::path(selectedDirectory));
+        AddPlaylistPaths(
+            state,
+            {std::filesystem::path(selectedDirectory)},
+            owner);
+    }
+}
+
+std::vector<std::filesystem::path> SelectedPlaylistImagePaths(
+    const ResidentState& state,
+    const std::vector<int>& rows) {
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(rows.size());
+    for (const int row : rows) {
+        paths.push_back(
+            state.playlistSources[static_cast<std::size_t>(row)].path);
+    }
+    return paths;
+}
+
+void RemoveSelectedPlaylistEntries(ResidentState& state, HWND owner) {
+    const auto selectedRows = SelectedPlaylistRows(state);
+    if (selectedRows.empty()) {
+        return;
+    }
+    std::vector<bool> removeRows(state.playlistFileEntries.size(), false);
+    for (const int row : selectedRows) {
+        if (static_cast<std::size_t>(row) < removeRows.size()) {
+            removeRows[static_cast<std::size_t>(row)] = true;
+        }
+    }
+    std::vector<std::wstring> entries;
+    entries.reserve(state.playlistFileEntries.size() - selectedRows.size());
+    for (std::size_t row = 0; row < state.playlistFileEntries.size(); ++row) {
+        if (!removeRows[row]) {
+            entries.push_back(state.playlistFileEntries[row]);
+        }
+    }
+    SaveEditedPlaylistFile(
+        state,
+        std::move(entries),
+        L"Removed " + std::to_wstring(selectedRows.size()) +
+            L" image(s) from the playlist.",
+        {},
+        owner);
+}
+
+void DeleteSelectedPlaylistFileEntries(ResidentState& state, HWND owner) {
+    const auto selectedRows = SelectedPlaylistRows(state);
+    if (selectedRows.empty()) {
+        return;
+    }
+    auto selectedPaths = SelectedPlaylistImagePaths(state, selectedRows);
+    std::vector<std::wstring> selectedPathStrings;
+    selectedPathStrings.reserve(selectedPaths.size());
+    for (const auto& path : selectedPaths) {
+        selectedPathStrings.push_back(path.wstring());
+    }
+    const auto uniquePaths =
+        swc::RemoveDuplicatePlaylistImagePaths(selectedPathStrings);
+    std::vector<std::filesystem::path> pathsToDelete;
+    pathsToDelete.reserve(uniquePaths.imagePaths.size());
+    for (const auto& path : uniquePaths.imagePaths) {
+        pathsToDelete.emplace_back(path);
+    }
+    if (!DeletePlaylistImagesFromDisk(pathsToDelete, owner)) {
+        return;
+    }
+
+    std::unordered_set<std::wstring> deletedPathKeys;
+    for (const auto& path : pathsToDelete) {
+        deletedPathKeys.insert(swc::PlaylistImagePathKey(path.wstring()));
+    }
+    std::vector<std::wstring> entries;
+    entries.reserve(state.playlistFileEntries.size());
+    for (const auto& entry : state.playlistFileEntries) {
+        if (deletedPathKeys.find(swc::PlaylistImagePathKey(entry)) ==
+            deletedPathKeys.end()) {
+            entries.push_back(entry);
+        }
+    }
+    SaveEditedPlaylistFile(
+        state,
+        std::move(entries),
+        L"Deleted " + std::to_wstring(pathsToDelete.size()) +
+            L" image(s) and removed them from the playlist.",
+        {},
+        owner);
+}
+
+void RemoveDuplicatePlaylistEntries(ResidentState& state, HWND owner) {
+    const auto result =
+        swc::RemoveDuplicatePlaylistImagePaths(state.playlistFileEntries);
+    if (result.removedCount == 0) {
+        state.playlistOperationStatus = L"No duplicate image paths were found.";
+        SetPlaylistHint(state, state.playlistRunning);
+        return;
+    }
+    SaveEditedPlaylistFile(
+        state,
+        result.imagePaths,
+        L"Found " + std::to_wstring(result.duplicatePathCount) +
+            L" path(s) with duplicates; removed " +
+            std::to_wstring(result.removedCount) + L" duplicate(s).",
+        {},
+        owner);
 }
 
 void ShowPlaylistContextMenu(ResidentState& state, int row) {
@@ -6208,12 +6736,10 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
         return;
     }
     const auto selectedRows = SelectedPlaylistRows(state);
-    std::vector<std::filesystem::path> selectedImagePaths;
-    selectedImagePaths.reserve(selectedRows.size());
-    for (const int selectedRow : selectedRows) {
-        selectedImagePaths.push_back(
-            state.playlistSources[static_cast<std::size_t>(selectedRow)].path);
-    }
+    const auto selectedImagePaths =
+        SelectedPlaylistImagePaths(state, selectedRows);
+    const bool playlistFileMode =
+        state.settings.imageSourceMode == swc::ImageSourceMode::playlistFile;
 
     HMENU menu = CreatePopupMenu();
     if (!menu) {
@@ -6237,10 +6763,22 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
         }
     }
     if (populated) {
-        if (!state.playlistDisplays.empty()) {
+        if (!state.playlistDisplays.empty() || playlistFileMode) {
             populated = AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         }
-        if (populated) {
+        if (populated && playlistFileMode) {
+            populated =
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    kRemovePlaylistEntriesCommandId,
+                    L"Remove") &&
+                AppendMenuW(
+                    menu,
+                    MF_STRING,
+                    kDeletePlaylistEntriesCommandId,
+                    L"Delete");
+        } else if (populated) {
             populated = AppendMenuW(
                 menu,
                 MF_STRING,
@@ -6278,6 +6816,14 @@ void ShowPlaylistContextMenu(ResidentState& state, int row) {
     PostMessageW(state.settingsWindow, WM_NULL, 0, 0);
     if (command == kDeletePlaylistImageCommandId) {
         DeletePlaylistImages(state, selectedImagePaths, state.settingsWindow);
+        return;
+    }
+    if (command == kRemovePlaylistEntriesCommandId) {
+        RemoveSelectedPlaylistEntries(state, state.settingsWindow);
+        return;
+    }
+    if (command == kDeletePlaylistEntriesCommandId) {
+        DeleteSelectedPlaylistFileEntries(state, state.settingsWindow);
         return;
     }
     if (command >= kSetDisplayCommandBase) {
@@ -6754,6 +7300,31 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 28, 662, kSettingsContentWidth, 28, window, kPlaylistHintId,
                 state->instance,
                 state->settingsFont);
+            state->playlistAddFilesButton = CreateSettingsControl(
+                0, L"BUTTON", L"Add file(s)",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                28, 700, 150, 32, window, kPlaylistAddFilesButtonId,
+                state->instance, state->settingsFont);
+            state->playlistAddFolderButton = CreateSettingsControl(
+                0, L"BUTTON", L"Add folder",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                186, 700, 150, 32, window, kPlaylistAddFolderButtonId,
+                state->instance, state->settingsFont);
+            state->playlistRemoveButton = CreateSettingsControl(
+                0, L"BUTTON", L"Remove",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                344, 700, 120, 32, window, kPlaylistRemoveButtonId,
+                state->instance, state->settingsFont);
+            state->playlistDeleteButton = CreateSettingsControl(
+                0, L"BUTTON", L"Delete",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                472, 700, 120, 32, window, kPlaylistDeleteButtonId,
+                state->instance, state->settingsFont);
+            state->playlistRemoveDuplicatesButton = CreateSettingsControl(
+                0, L"BUTTON", L"Remove Duplicates",
+                WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                600, 700, 190, 32, window, kPlaylistRemoveDuplicatesButtonId,
+                state->instance, state->settingsFont);
             CreateSettingsControl(
                 0, L"BUTTON", L"Close",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
@@ -6832,7 +7403,12 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 static_cast<int>(wParam) == kNewPlaylistFileButtonId ||
                 static_cast<int>(wParam) == kOpenPlaylistFileButtonId ||
                 static_cast<int>(wParam) == kSaveAsPlaylistFileButtonId ||
-                static_cast<int>(wParam) == kRemoveSourceDirectoryButtonId)) {
+                static_cast<int>(wParam) == kRemoveSourceDirectoryButtonId ||
+                static_cast<int>(wParam) == kPlaylistAddFilesButtonId ||
+                static_cast<int>(wParam) == kPlaylistAddFolderButtonId ||
+                static_cast<int>(wParam) == kPlaylistRemoveButtonId ||
+                static_cast<int>(wParam) == kPlaylistDeleteButtonId ||
+                static_cast<int>(wParam) == kPlaylistRemoveDuplicatesButtonId)) {
             DrawPlaylistFileButton(
                 *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
             return TRUE;
@@ -7021,6 +7597,10 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
                 }
             }
             if (notification->hwndFrom == state->playlistList) {
+                if (notification->code == LVN_ITEMCHANGED) {
+                    SyncPlaylistEditControls(*state);
+                    return 0;
+                }
                 if (notification->code == LVN_BEGINDRAG) {
                     const auto* drag = reinterpret_cast<const NMLISTVIEW*>(lParam);
                     const int firstSelectedRow =
@@ -7340,6 +7920,48 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         case kSaveAsPlaylistFileButtonId:
             if (HIWORD(wParam) == BN_CLICKED) {
                 SaveAsPlaylistFile(*state, window);
+                return 0;
+            }
+            break;
+        case kPlaylistAddFilesButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                try {
+                    AddPlaylistFilesFromPicker(*state, window);
+                } catch (const Failure& failure) {
+                    ShowError(failure.message, window);
+                } catch (const std::exception&) {
+                    ShowError(L"Could not add images to the playlist.", window);
+                }
+                return 0;
+            }
+            break;
+        case kPlaylistAddFolderButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                try {
+                    AddPlaylistFolder(*state, window);
+                } catch (const Failure& failure) {
+                    ShowError(failure.message, window);
+                } catch (const std::exception&) {
+                    ShowError(L"Could not add images from the selected folder.", window);
+                }
+                return 0;
+            }
+            break;
+        case kPlaylistRemoveButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RemoveSelectedPlaylistEntries(*state, window);
+                return 0;
+            }
+            break;
+        case kPlaylistDeleteButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                DeleteSelectedPlaylistFileEntries(*state, window);
+                return 0;
+            }
+            break;
+        case kPlaylistRemoveDuplicatesButtonId:
+            if (HIWORD(wParam) == BN_CLICKED) {
+                RemoveDuplicatePlaylistEntries(*state, window);
                 return 0;
             }
             break;

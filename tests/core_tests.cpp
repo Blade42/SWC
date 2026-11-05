@@ -8,6 +8,21 @@
 
 int main() {
     {
+        const auto result = swc::RemoveDuplicatePlaylistImagePaths({
+            L"C:\\Wallpapers\\one.jpg",
+            L"C:\\Wallpapers\\two.jpg",
+            L"c:\\wallpapers\\ONE.jpg",
+            L"C:\\Wallpapers\\folder\\..\\two.jpg",
+            L"C:\\Wallpapers\\three.jpg"});
+        assert(result.imagePaths.size() == 3);
+        assert(result.imagePaths[0] == L"C:\\Wallpapers\\one.jpg");
+        assert(result.imagePaths[1] == L"C:\\Wallpapers\\two.jpg");
+        assert(result.imagePaths[2] == L"C:\\Wallpapers\\three.jpg");
+        assert(result.duplicatePathCount == 2);
+        assert(result.removedCount == 2);
+    }
+
+    {
         const auto order = swc::PlaylistThumbnailPriorityOrder(10, 4, 2);
         assert((order == std::vector<std::size_t>{4, 5, 3, 6, 2, 7, 1, 8, 0, 9}));
     }
@@ -93,6 +108,14 @@ int main() {
         assert(settings.imageSourceMode == swc::ImageSourceMode::playlistFile);
         assert(settings.playlistFilePath ==
             L"C:\\Wallpapers\\My playlist.txt");
+        assert(settings.lastPlaylistImportFolder.empty());
+    }
+
+    {
+        std::wistringstream input(
+            L"last_playlist_import_folder=D:\\Pictures\\Summer\n");
+        const auto settings = swc::ParseSettings(input);
+        assert(settings.lastPlaylistImportFolder == L"D:\\Pictures\\Summer");
     }
 
     {

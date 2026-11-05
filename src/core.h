@@ -4,11 +4,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <cwctype>
+#include <filesystem>
 #include <iomanip>
 #include <istream>
 #include <limits>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -54,6 +56,42 @@ inline void RememberPlaylistFile(
     if (playlistFiles.size() > kMaxRecentPlaylistFiles) {
         playlistFiles.resize(kMaxRecentPlaylistFiles);
     }
+}
+
+struct PlaylistDuplicateRemoval {
+    std::vector<std::wstring> imagePaths;
+    std::size_t duplicatePathCount = 0;
+    std::size_t removedCount = 0;
+};
+
+inline std::wstring PlaylistImagePathKey(const std::wstring& imagePath) {
+    std::wstring key =
+        std::filesystem::path(imagePath).lexically_normal().wstring();
+    std::transform(
+        key.begin(),
+        key.end(),
+        key.begin(),
+        [](wchar_t character) { return std::towlower(character); });
+    return key;
+}
+
+inline PlaylistDuplicateRemoval RemoveDuplicatePlaylistImagePaths(
+    const std::vector<std::wstring>& imagePaths) {
+    PlaylistDuplicateRemoval result;
+    result.imagePaths.reserve(imagePaths.size());
+    std::unordered_set<std::wstring> seenPaths;
+    std::unordered_set<std::wstring> duplicatePaths;
+    for (const auto& imagePath : imagePaths) {
+        std::wstring key = PlaylistImagePathKey(imagePath);
+        if (seenPaths.insert(key).second) {
+            result.imagePaths.push_back(imagePath);
+        } else {
+            duplicatePaths.insert(std::move(key));
+            ++result.removedCount;
+        }
+    }
+    result.duplicatePathCount = duplicatePaths.size();
+    return result;
 }
 
 inline bool operator==(const SourceDirectory& left, const SourceDirectory& right) {
@@ -118,6 +156,7 @@ struct Settings {
     std::vector<SourceDirectory> sourceDirectories;
     ImageSourceMode imageSourceMode = ImageSourceMode::sourceFolders;
     std::wstring playlistFilePath;
+    std::wstring lastPlaylistImportFolder;
     std::vector<std::wstring> recentPlaylistFiles;
     bool recentPlaylistHistoryInitialized = false;
     std::vector<DisplayImage> displayImages;
@@ -529,6 +568,8 @@ inline Settings ParseSettings(std::wistream& input) {
             }
         } else if (identifier == L"playlist_file") {
             settings.playlistFilePath = value;
+        } else if (identifier == L"last_playlist_import_folder") {
+            settings.lastPlaylistImportFolder = value;
         } else if (identifier == L"recent_playlist_file") {
             RememberPlaylistFile(settings.recentPlaylistFiles, value);
         } else if (identifier == L"recent_playlist_history_initialized") {
