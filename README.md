@@ -1,5 +1,17 @@
 # Simple Wallpaper Changer
 
+## About, license, and downloads
+
+Created by Laszlo Kosa as a personal project for fun, utilizing GitHub Copilot. This program is provided as-is; the author accepts no responsibility for any consequences arising from its use.
+
+The latest version of the program is available on [GitHub](https://github.com/Blade42/SWC/).
+
+The project is licensed under the [Creative Commons Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0)](https://creativecommons.org/licenses/by-nc/4.0/). You may use and modify it for noncommercial purposes with attribution. Commercial use, including selling this program or derivative works, is not permitted.
+
+To use a precompiled release, download the contents of the repository's `build/` directory and place them together in a folder where the current user has write permission. The program creates `settings.ini` beside the executable the first time it runs.
+
+**Security warning:** Precompiled `.exe` files can contain malicious code. Only run one if you trust its source. If you do not want to rely on a precompiled executable, inspect the source and rebuild the project yourself using the instructions below.
+
 A small Windows C++ program that runs as a background resident with a system-tray icon. The tray menu can advance wallpapers on demand or exit the resident. It chooses images from a folder, creates a display-sized PNG for each connected display, and applies them as the desktop wallpapers. Image decoding and encoding use Windows Imaging Component (WIC); there are no bundled runtime libraries or network requirements. The process runs at idle priority.
 
 ## Build

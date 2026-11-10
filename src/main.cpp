@@ -119,6 +119,9 @@ constexpr int kPlaylistAddFolderButtonId = 2068;
 constexpr int kPlaylistRemoveButtonId = 2069;
 constexpr int kPlaylistDeleteButtonId = 2070;
 constexpr int kPlaylistRemoveDuplicatesButtonId = 2071;
+constexpr int kInfoTextId = 2072;
+constexpr int kInfoGithubLinkId = 2073;
+constexpr int kInfoLicenseLinkId = 2074;
 constexpr UINT kSetDisplayCommandBase = 40000;
 constexpr UINT kDeletePlaylistImageCommandId = 1100;
 constexpr UINT kRemovePlaylistEntriesCommandId = 1101;
@@ -2733,6 +2736,9 @@ struct ResidentState {
     HWND window = nullptr;
     HWND settingsWindow = nullptr;
     HWND settingsTabs = nullptr;
+    HWND infoText = nullptr;
+    HWND infoGithubLink = nullptr;
+    HWND infoLicenseLink = nullptr;
     HWND monitorPreviewPanel = nullptr;
     HWND countdownDisplay = nullptr;
     HWND countdownPreviousButton = nullptr;
@@ -5062,6 +5068,24 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
         tabsY,
         contentWidth,
         std::max(1, footerY - 12 - tabsY));
+    moveControl(
+        state.infoText,
+        30,
+        190,
+        std::max(1, clientWidth - 60),
+        180);
+    moveControl(
+        state.infoGithubLink,
+        30,
+        382,
+        std::max(1, clientWidth - 60),
+        24);
+    moveControl(
+        state.infoLicenseLink,
+        30,
+        410,
+        std::max(1, clientWidth - 60),
+        24);
     moveControl(state.sourceFoldersModeRadio, 28, 174, 180, 28);
     moveControl(state.playlistFileModeRadio, 220, 174, 180, 28);
     const int sourceActionY = clientHeight - 100;
@@ -5425,12 +5449,16 @@ void ShowSettingsPage(ResidentState& state) {
     const bool sourcesPage = page == 1;
     const bool backgroundPage = page == 3;
     const bool countdownPage = page == 5;
+    const bool infoPage = page == 6;
     if (sourcesPage) {
         PruneMissingRecentPlaylistFiles(state, state.settingsWindow);
     }
     ShowWindow(state.changeOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.openWindowOnStartCheckbox, startupPage ? SW_SHOW : SW_HIDE);
     ShowWindow(state.startWithWindowsCheckbox, startupPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.infoText, infoPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.infoGithubLink, infoPage ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.infoLicenseLink, infoPage ? SW_SHOW : SW_HIDE);
     const bool folderSourcePage = sourcesPage &&
         state.settings.imageSourceMode == swc::ImageSourceMode::sourceFolders;
     const bool playlistFileSourcePage = sourcesPage && !folderSourcePage;
@@ -6931,6 +6959,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             wchar_t backgroundTabText[] = L"Background";
             wchar_t imageTabText[] = L"Image";
             wchar_t countdownTabText[] = L"Countdown";
+            wchar_t infoTabText[] = L"Info";
             TCITEMW tab{};
             tab.mask = TCIF_TEXT;
             tab.pszText = startupTabText;
@@ -6957,7 +6986,54 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             if (TabCtrl_InsertItem(state->settingsTabs, 5, &tab) == -1) {
                 Fail(L"Could not add the Countdown settings tab.");
             }
+            tab.pszText = infoTabText;
+            if (TabCtrl_InsertItem(state->settingsTabs, 6, &tab) == -1) {
+                Fail(L"Could not add the Info settings tab.");
+            }
             TabCtrl_SetCurSel(state->settingsTabs, 0);
+
+            state->infoText = CreateSettingsControl(
+                0,
+                L"STATIC",
+                L"Created by Laszlo Kosa as a personal project for fun, utilizing GitHub Copilot.\r\n\r\n"
+                L"This program is provided as-is. The author accepts no responsibility for any consequences arising from its use.\r\n\r\n"
+                L"Licensed under the Creative Commons Attribution-NonCommercial 4.0 International license (CC BY-NC 4.0). "
+                L"You may use and modify this program for noncommercial purposes with attribution. Commercial use, including selling this program or derivative works, is not permitted.",
+                WS_CHILD | SS_LEFT,
+                30,
+                190,
+                kSettingsContentWidth - 60,
+                180,
+                window,
+                kInfoTextId,
+                state->instance,
+                state->settingsFont);
+            state->infoGithubLink = CreateSettingsControl(
+                0,
+                WC_LINK,
+                L"<a href=\"https://github.com/Blade42/SWC/\">Latest version on GitHub</a>",
+                WS_CHILD | WS_TABSTOP,
+                30,
+                382,
+                kSettingsContentWidth - 60,
+                24,
+                window,
+                kInfoGithubLinkId,
+                state->instance,
+                state->settingsFont);
+            state->infoLicenseLink = CreateSettingsControl(
+                0,
+                WC_LINK,
+                L"<a href=\"https://creativecommons.org/licenses/by-nc/4.0/\">CC BY-NC 4.0 license</a>",
+                WS_CHILD | WS_TABSTOP,
+                30,
+                410,
+                kSettingsContentWidth - 60,
+                24,
+                window,
+                kInfoLicenseLinkId,
+                state->instance,
+                state->settingsFont);
 
             state->changeOnStartCheckbox = CreateSettingsControl(
                 0, L"BUTTON", L"Change wallpaper when the program starts",
@@ -7478,6 +7554,25 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
     case WM_NOTIFY:
         if (state) {
             const auto* notification = reinterpret_cast<const NMHDR*>(lParam);
+            if ((notification->hwndFrom == state->infoGithubLink ||
+                 notification->hwndFrom == state->infoLicenseLink) &&
+                (notification->code == NM_CLICK ||
+                 notification->code == NM_RETURN)) {
+                const auto* link = reinterpret_cast<const NMLINK*>(lParam);
+                const HINSTANCE result = ShellExecuteW(
+                    window,
+                    L"open",
+                    link->item.szUrl,
+                    nullptr,
+                    nullptr,
+                    SW_SHOWNORMAL);
+                if (reinterpret_cast<INT_PTR>(result) <= 32) {
+                    ShowError(
+                        L"Could not open the link in the default browser.",
+                        window);
+                }
+                return 0;
+            }
             if (notification->hwndFrom == state->settingsTabs &&
                 notification->code == TCN_SELCHANGE) {
                 ShowSettingsPage(*state);
@@ -8697,7 +8792,8 @@ int RunResident(HINSTANCE instance) {
 
     INITCOMMONCONTROLSEX commonControls{};
     commonControls.dwSize = sizeof(commonControls);
-    commonControls.dwICC = ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES;
+    commonControls.dwICC =
+        ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_LINK_CLASS;
     if (!InitCommonControlsEx(&commonControls)) {
         FailWin32(L"Could not initialize the settings tabs");
     }
