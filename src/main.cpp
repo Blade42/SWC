@@ -46,6 +46,7 @@ constexpr wchar_t kSettingsWindowClass[] = L"SimpleWallpaperChangerSettingsWindo
 constexpr UINT kTrayCallbackMessage = WM_APP + 1;
 constexpr UINT kWallpaperChangeCompleteMessage = WM_APP + 2;
 constexpr UINT kPlaylistRefreshMessage = WM_APP + 3;
+constexpr UINT kCountdownDisplayClickMessage = WM_APP + 4;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kNextCommandId = 1001;
 constexpr UINT kPreviousCommandId = 1002;
@@ -3919,6 +3920,30 @@ LRESULT CALLBACK PlaylistListDragSubclass(
     return DefSubclassProc(list, message, wParam, lParam);
 }
 
+LRESULT CALLBACK CountdownDisplaySubclass(
+    HWND display,
+    UINT message,
+    WPARAM wParam,
+    LPARAM lParam,
+    UINT_PTR subclassId,
+    DWORD_PTR) {
+    if (message == WM_LBUTTONUP) {
+        const int x = GET_X_LPARAM(lParam);
+        const LRESULT result =
+            DefSubclassProc(display, message, wParam, lParam);
+        SendMessageW(
+            GetParent(display),
+            kCountdownDisplayClickMessage,
+            static_cast<WPARAM>(x),
+            0);
+        return result;
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(display, CountdownDisplaySubclass, subclassId);
+    }
+    return DefSubclassProc(display, message, wParam, lParam);
+}
+
 LRESULT CALLBACK MonitorPreviewPanelProc(
     HWND panel,
     UINT message,
@@ -5241,12 +5266,12 @@ void LayoutSettingsWindow(ResidentState& state, int clientWidth, int clientHeigh
         imageLargeGroupX + 20, 463, imageGroupWidth - 40, 28);
     moveControl(state.countdownEnabledCheckbox, 30, 190, clientWidth - 60, 28);
     moveControl(state.countdownDurationGroup, 20, 232, clientWidth - 40, 104);
-    moveControl(state.countdownHoursLabel, 50, 260, 120, 24);
-    moveControl(state.countdownHoursEdit, 50, 286, 120, 30);
-    moveControl(state.countdownMinutesLabel, 250, 260, 120, 24);
-    moveControl(state.countdownMinutesEdit, 250, 286, 120, 30);
-    moveControl(state.countdownSecondsLabel, 450, 260, 120, 24);
-    moveControl(state.countdownSecondsEdit, 450, 286, 120, 30);
+    moveControl(state.countdownHoursLabel, 50, 260, 130, 24);
+    moveControl(state.countdownHoursEdit, 50, 286, 56, 30);
+    moveControl(state.countdownMinutesLabel, 190, 260, 130, 24);
+    moveControl(state.countdownMinutesEdit, 190, 286, 56, 30);
+    moveControl(state.countdownSecondsLabel, 330, 260, 130, 24);
+    moveControl(state.countdownSecondsEdit, 330, 286, 56, 30);
     moveControl(
         GetDlgItem(state.settingsWindow, kExitSettingsButtonId),
         clientWidth - 28 - 82 - 10 - 82,
@@ -6040,6 +6065,88 @@ void ResetCountdown(ResidentState& state) {
     }
 }
 
+void FocusCountdownFieldAtDisplayPosition(
+    ResidentState& state,
+    int clickX,
+    HWND owner) {
+    if (!state.countdownDisplay || !state.countdownFont) {
+        return;
+    }
+
+    const int displayTextLength = GetWindowTextLengthW(state.countdownDisplay);
+    std::wstring displayText(
+        static_cast<std::size_t>(std::max(0, displayTextLength)) + 1,
+        L'\0');
+    const int copiedTextLength = GetWindowTextW(
+        state.countdownDisplay,
+        displayText.data(),
+        static_cast<int>(displayText.size()));
+    displayText.resize(static_cast<std::size_t>(std::max(0, copiedTextLength)));
+    if (displayText.size() < 8) {
+        return;
+    }
+
+    RECT client{};
+    if (!GetClientRect(state.countdownDisplay, &client)) {
+        ShowError(L"Could not inspect the countdown display.", owner);
+        return;
+    }
+    HDC dc = GetDC(state.countdownDisplay);
+    if (!dc) {
+        ShowError(L"Could not measure the countdown display.", owner);
+        return;
+    }
+    HGDIOBJ previousFont = SelectObject(dc, state.countdownFont);
+    int prefixWidths[9]{};
+    bool measured = true;
+    for (int length = 1; length <= 8; ++length) {
+        SIZE textSize{};
+        if (!GetTextExtentPoint32W(
+                dc, displayText.c_str(), length, &textSize)) {
+            measured = false;
+            break;
+        }
+        prefixWidths[length] = textSize.cx;
+    }
+    SelectObject(dc, previousFont);
+    ReleaseDC(state.countdownDisplay, dc);
+    if (!measured) {
+        ShowError(L"Could not measure the countdown display.", owner);
+        return;
+    }
+
+    const int textLeft = (client.right - prefixWidths[8]) / 2;
+    int digitIndex = -1;
+    for (int index = 0; index < 8; ++index) {
+        const int digitLeft = textLeft + prefixWidths[index];
+        const int digitRight = textLeft + prefixWidths[index + 1];
+        if (clickX >= digitLeft && clickX < digitRight) {
+            digitIndex = index;
+            break;
+        }
+    }
+
+    HWND edit = nullptr;
+    if (digitIndex == 0 || digitIndex == 1) {
+        edit = state.countdownHoursEdit;
+    } else if (digitIndex == 3 || digitIndex == 4) {
+        edit = state.countdownMinutesEdit;
+    } else if (digitIndex == 6 || digitIndex == 7) {
+        edit = state.countdownSecondsEdit;
+    }
+    if (!edit) {
+        return;
+    }
+
+    if (TabCtrl_GetCurSel(state.settingsTabs) != 5) {
+        TabCtrl_SetCurSel(state.settingsTabs, 5);
+        ShowSettingsPage(state);
+        CancelPlaylistRefresh(state);
+    }
+    SetFocus(edit);
+    SendMessageW(edit, EM_SETSEL, 0, -1);
+}
+
 void StartOrStopCountdown(
     ResidentState& state,
     bool enabled,
@@ -6101,22 +6208,9 @@ std::wstring ReadEditText(HWND edit) {
     return text;
 }
 
-bool IsCountdownDurationEditId(int controlId) {
-    return controlId == kCountdownHoursEditId ||
-        controlId == kCountdownMinutesEditId ||
-        controlId == kCountdownSecondsEditId;
-}
-
 void SaveCountdownDuration(
     ResidentState& state,
-    HWND owner,
-    bool force = false) {
-    const HWND focused = GetFocus();
-    if (!force && focused &&
-        IsCountdownDurationEditId(GetDlgCtrlID(focused))) {
-        return;
-    }
-
+    HWND owner) {
     const std::wstring hours = ReadEditText(state.countdownHoursEdit);
     const std::wstring minutes = ReadEditText(state.countdownMinutesEdit);
     const std::wstring seconds = ReadEditText(state.countdownSecondsEdit);
@@ -6877,6 +6971,12 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
     }
 
     switch (message) {
+    case kCountdownDisplayClickMessage:
+        if (state) {
+            FocusCountdownFieldAtDisplayPosition(
+                *state, static_cast<int>(wParam), window);
+        }
+        return 0;
     case WM_CREATE: {
         state->settingsWindow = window;
         try {
@@ -6894,9 +6994,13 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
         }
         state->countdownDisplay = CreateSettingsControl(
             0, L"STATIC", L"00:10:00",
-            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE | SS_NOTIFY,
             12, 40, 220, 42, window, kCountdownDisplayId,
             state->instance, state->settingsFont);
+        if (!SetWindowSubclass(
+                state->countdownDisplay, CountdownDisplaySubclass, 1, 0)) {
+            FailWin32(L"Could not enable countdown digit selection");
+        }
         SendMessageW(
             state->countdownDisplay,
             WM_SETFONT,
@@ -7230,34 +7334,34 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             state->countdownHoursLabel = CreateSettingsControl(
                 0, L"STATIC", L"Hours (0-99)",
                 WS_CHILD | SS_LEFT,
-                50, 260, 120, 24, window, kCountdownHoursLabelId,
+                50, 260, 130, 24, window, kCountdownHoursLabelId,
                 state->instance, state->settingsFont);
             state->countdownHoursEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
-                50, 286, 120, 30, window, kCountdownHoursEditId,
+                50, 286, 56, 30, window, kCountdownHoursEditId,
                 state->instance, state->settingsFont);
             SendMessageW(state->countdownHoursEdit, EM_LIMITTEXT, 2, 0);
             state->countdownMinutesLabel = CreateSettingsControl(
                 0, L"STATIC", L"Minutes (0-59)",
                 WS_CHILD | SS_LEFT,
-                250, 260, 120, 24, window, kCountdownMinutesLabelId,
+                190, 260, 130, 24, window, kCountdownMinutesLabelId,
                 state->instance, state->settingsFont);
             state->countdownMinutesEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
-                250, 286, 120, 30, window, kCountdownMinutesEditId,
+                190, 286, 56, 30, window, kCountdownMinutesEditId,
                 state->instance, state->settingsFont);
             SendMessageW(state->countdownMinutesEdit, EM_LIMITTEXT, 2, 0);
             state->countdownSecondsLabel = CreateSettingsControl(
                 0, L"STATIC", L"Seconds (0-59)",
                 WS_CHILD | SS_LEFT,
-                450, 260, 120, 24, window, kCountdownSecondsLabelId,
+                330, 260, 130, 24, window, kCountdownSecondsLabelId,
                 state->instance, state->settingsFont);
             state->countdownSecondsEdit = CreateSettingsControl(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_RIGHT,
-                450, 286, 120, 30, window, kCountdownSecondsEditId,
+                330, 286, 56, 30, window, kCountdownSecondsEditId,
                 state->instance, state->settingsFont);
             SendMessageW(state->countdownSecondsEdit, EM_LIMITTEXT, 2, 0);
             SyncCountdownControls(*state);
@@ -8279,7 +8383,7 @@ LRESULT CALLBACK SettingsWindowProc(HWND window, UINT message, WPARAM wParam, LP
             break;
     case WM_CLOSE:
         if (state) {
-            SaveCountdownDuration(*state, window, true);
+            SaveCountdownDuration(*state, window);
             SaveSettingsWindowBoundsWithError(*state, window);
         }
         DestroyWindow(window);
@@ -8630,7 +8734,7 @@ void RequestResidentExit(ResidentState& state) {
     }
     state.changeRunning = false;
     if (state.settingsWindow) {
-        SaveCountdownDuration(state, state.settingsWindow, true);
+        SaveCountdownDuration(state, state.settingsWindow);
         SaveSettingsWindowBoundsWithError(state, state.settingsWindow);
         DestroyWindow(state.settingsWindow);
     }
